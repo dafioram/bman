@@ -203,6 +203,11 @@ def quotas(fs: M.Fs, runner: Runner = run) -> Quotas:
     return Quotas(True, mode, inconsistent, M.parse_qgroups(r.out), rescanning)
 
 
+def subvol_uuid(path: str, runner: Runner = run) -> str:
+    r = runner(["btrfs", "subvolume", "show", path])
+    return M.parse_subvol_show_uuid(r.out) if r.ok else ""
+
+
 def subvol_created(path: str, runner: Runner = run) -> Optional[float]:
     r = runner(["btrfs", "subvolume", "show", path])
     return M.parse_subvol_show_time(r.out) if r.ok else None
@@ -310,14 +315,6 @@ def disk_for_path(path: str, disks: Sequence[M.Disk]) -> Tuple[Optional[M.Disk],
             if p.name == k:
                 return d, p
     return None, None
-
-
-def read_diskstats() -> Dict[str, Tuple[int, int, int, int]]:
-    try:
-        with open(TARGET.diskstats, encoding="utf-8", errors="replace") as f:
-            return M.parse_diskstats(f.read())
-    except OSError:
-        return {}
 
 
 def scrub_schedule(runner: Runner = run) -> List[str]:

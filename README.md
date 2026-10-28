@@ -8,10 +8,10 @@ anything long or destructive, and asks before it changes anything.
 ```
 bman  Btrfs on this host - 3 filesystems, 7 subvolumes, 5 snapshots, 1 with missing devices
 
-1  Filesystems       5  Live I/O
-2  Subvolumes        6  Space & cleanup
-3  Snapshots         7  System info
-4  Disks             h  Help
+1  Filesystems       5  Space & cleanup
+2  Subvolumes        6  System info
+3  Snapshots         h  Help
+4  Disks
 b back · q quit
 >
 ```
@@ -46,6 +46,11 @@ sudo bman
 | `/usr/local/lib/bman/` | the program, `VERSION` and an install marker |
 | `/etc/bman/bman.conf` | config, written only if it does not exist |
 
+If `./install.sh` says `Permission denied`, the files lost their executable bit
+(this happens when a zip is unpacked or committed by some tools). Run
+`sudo sh install.sh` instead, and restore the bit in git so CI's check passes:
+`git update-index --chmod=+x install.sh uninstall.sh bman.py`.
+
 Reinstalling (for example after `git pull`) replaces the program in place and keeps
 the config. The installed copy does not depend on the folder you installed from.
 Both scripts refuse to touch any file at those paths that they did not create.
@@ -67,6 +72,10 @@ they install, which is how the tests run them without root.
   `/run/bman/<uuid>` when it needs to, and unmounts it when you quit. When you
   unmount a filesystem's last mount from bman, it keeps this working mount so you
   can still restore or snapshot it.
+- **Seeing compression.** Each mount line in a filesystem's view shows its
+  compression (`/data  (top level, compress=zstd:3)`), and each subvolume's view,
+  including `(top level)`, shows what applies to new files there: its own
+  property if set, otherwise the mount option.
 - **Compression on by default.** bman suggests `compress=zstd:1,noatime` when it
   mounts a filesystem or writes an fstab line (change it in the config). Each
   subvolume also has its own compression setting, stored in the filesystem.
@@ -133,7 +142,11 @@ Replace with another disk → watch it finish → **Fix chunks that are not
 mirrored** if bman shows it, because writes made while degraded have only one copy.
 
 **Subvolumes.** Across all mounted filesystems, with state, snapshot count, size
-(with quotas) and where each is mounted. A subvolume's view: take a snapshot, list
+(with quotas) and where each is mounted. Each mounted filesystem also has a
+`(top level)` row: its root, which is where your files are if you use the drive
+without subvolumes. It shows the compression in effect, can be snapshotted (into
+`.snapshots/_top/`), and is never offered for delete, rename or restore; to get
+files back from a top-level snapshot, open a shell in the snapshot and copy them. A subvolume's view: take a snapshot, list
 its snapshots, mount and unmount, add to or remove from fstab, compression, open a
 shell in it, rename, delete. Delete is refused while it is mounted, is the default
 subvolume, holds other subvolumes, is in fstab, or is your running system.
@@ -152,9 +165,6 @@ page with `btrfs filesystem du`). For a snapshot:
 
 **Disks.** Every disk with size, how it is used, type, serial, model and by-id
 name, linking to its filesystem and device.
-
-**Live I/O.** Reads and writes per filesystem over one second, from
-`/proc/diskstats`, with auto-refresh.
 
 **Space & cleanup.** Raw size, used and free per filesystem, data chunks that are
 allocated but unused (with a link to reclaim them), snapshot counts and sizes, and
@@ -189,6 +199,7 @@ Every change goes preview → confirm → re-check → run:
   are flagged red), defragmenting (it breaks the sharing between snapshots),
   send/receive, seed devices, swap files, and per-file `nodatacow`.
 - Restoring the subvolume your running system boots from.
+- Live I/O monitoring: use `iostat` or `btop`.
 - A diff between a snapshot and the current files: Btrfs has no fast way; open a
   shell in the snapshot instead.
 

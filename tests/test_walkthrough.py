@@ -91,7 +91,8 @@ class Walk(unittest.TestCase):
         text = self.start()
         self.assertIn("bman  Btrfs on this host", text)
         self.assertIn("1 with missing devices", text)
-        self.assertIn("7  System info", text)
+        self.assertIn("6  System info", text)
+        self.assertNotIn("Live I/O", text)
         self.assertIn("Unknown key: x", self.go("x"))
         self.assertIn("1  Filesystems", self.go("m"))
         self.assertIn("Quit bman? [Y/n]", self.go("b"))
@@ -103,7 +104,7 @@ class Walk(unittest.TestCase):
 
     def test_back_main_quit(self) -> None:
         self.start()
-        self.assertIn("Filesystems  4", self.go("1"))
+        self.assertIn("Filesystems  5", self.go("1"))
         self.assertIn("1  Filesystems", self.go("b"))
         self.go("1", "2")
         self.assertIn("1  Filesystems", self.go("m"))
@@ -189,7 +190,8 @@ class Walk(unittest.TestCase):
 
     def test_mount_unmounted_add_device_convert_wipe_refused(self) -> None:
         self.start()
-        text = self.go("1", "4")
+        text = self.go("1")
+        text = self.go(self.row(text, "olddisk"))
         self.assertIn("not mounted", text)
         self.assertIn("17  Mount", text)
         self.assertIn("20  Wipe filesystem", text)
@@ -216,7 +218,8 @@ class Walk(unittest.TestCase):
 
     def test_wipe_unmounted_filesystem(self) -> None:
         self.start()
-        self.go("1", "4", "20")
+        text = self.go("1")
+        self.go(self.row(text, "olddisk"), "20")
         text = self.snap("wipe-preview")
         self.assertIn("Erases the Btrfs filesystem olddisk", text)
         self.assertIn("wipefs -a", text)
@@ -227,7 +230,7 @@ class Walk(unittest.TestCase):
         self.assertIn("Comment out its 1 line", text)
         text = self.go("")
         self.assertIn("Removed filesystem olddisk", text)
-        self.assertIn("Filesystems  3", text)
+        self.assertIn("Filesystems  4", text)
         self.assertIn("# removed by bman", self.fstab())
 
     def test_create_dup_filesystem_with_fstab(self) -> None:
@@ -421,6 +424,50 @@ class Walk(unittest.TestCase):
         self.assertIn("Done.", text)
         self.assertIn("Compression: zstd", text)
 
+    def test_plain_drive_without_subvolumes(self) -> None:
+        """A drive used as is: mounted at the top level from fstab, compression on, no subvolumes."""
+        self.start()
+        text = self.go("1")
+        text = self.go(self.row(text, "plain"))
+        self.assertIn("/mnt/plain  (top level, compress=zstd:3)", text)
+        text = self.go("b", "b", "2")
+        self.assertIn("(top level)", text)
+        lines = [ln for ln in text.splitlines() if "(top level)" in ln and "plain" in ln]
+        self.assertEqual(len(lines), 1, text)
+        text = self.go(lines[0].split()[0])
+        self.assertIn("(top level)  id 5", text)
+        self.assertIn("Compression: zstd:3 (mount option)", text)
+        self.assertIn("Fstab:       /mnt/plain", text)
+        self.assertIn("Delete is not offered: it is the top level", text)
+        self.assertNotIn("Rename", text)
+        self.assertNotIn("13  Delete", text)
+        text = self.go("2")
+        self.assertIn(".snapshots/_top/", text)
+        text = self.go("")
+        self.assertIn("Done. Took .snapshots/_top/manual-", text)
+        self.assertIn("It covers every file on the filesystem.", text)
+        self.assertIn("Snapshots:   1", text)
+        text = self.go("1")
+        self.assertIn("Snapshots of (top level)", text)
+        text = self.go("1")
+        self.assertIn("Of:         (top level)", text)
+        self.assertIn("Restore is not offered: Btrfs cannot swap out the top level", text)
+        self.assertNotIn("Restore it over", text)
+        text = self.go("b", "b", "7", "1", "")
+        self.assertIn("Compression: zstd", text)
+        self.assertNotIn("(mount option)", text)
+
+    def test_unmount_top_level_keeps_access(self) -> None:
+        self.start()
+        text = self.go("2")
+        line = next(ln for ln in text.splitlines() if "(top level)" in ln and "plain" in ln)
+        text = self.go(line.split()[0], "4")
+        self.assertIn("last mount of plain", text)
+        text = self.go("")
+        self.assertIn("Unmounted /mnt/plain", text)
+        self.assertIn("(top level)  id 5", text)            # still reachable through bman's own mount
+        self.assertIn("3  Mount", text)
+
     # ------------------------------------------------------------ snapshots
 
     def test_snapshot_list_and_restore(self) -> None:
@@ -493,7 +540,7 @@ class Walk(unittest.TestCase):
 
     def test_prune(self) -> None:
         self.start()
-        text = self.go("6")
+        text = self.go("5")
         self.assertIn("Prune snapshots (4 can be pruned)", text)
         text = self.go("1")
         self.assertNotIn("1/snapshot", text)
@@ -503,7 +550,7 @@ class Walk(unittest.TestCase):
         self.assertIn("Removed 1 snapshot", text)
         self.assertIn("3 can be pruned", text)
 
-    def test_disks_and_live_io(self) -> None:
+    def test_disks(self) -> None:
         self.start()
         text = self.go("4")
         self.assertIn("btrfs olddisk (not mounted)", text)
@@ -512,10 +559,6 @@ class Walk(unittest.TestCase):
         self.assertIn("Filesystem: tank", text)
         text = self.go("2")
         self.assertIn("devid 1", text)
-        self.go("m", "5")
-        self.t.key("a", quiet=1.5, wait_prompt=False)
-        self.assertIn("Ctrl-C stops", self.snap("auto"))
-        self.assertIn("a auto-refresh", self.go("^C"))
 
     def test_config_warning(self) -> None:
         os.makedirs(self.mock, exist_ok=True)
@@ -534,8 +577,7 @@ class Walk(unittest.TestCase):
                 shutil.rmtree(self.mock, ignore_errors=True)
                 self.start(cols, rows)
                 for path in (["1"], ["1", "1"], ["1", "1", "1"], ["1", "1", "1", "2"], ["1", "2", "19"],
-                             ["1", "4"], ["2"], ["2", "1"], ["3"], ["3", "1"], ["4"], ["4", "3"], ["5"], ["6"],
-                             ["7"]):
+                             ["1", "4"], ["2"], ["2", "1"], ["3"], ["3", "1"], ["4"], ["4", "3"], ["5"], ["6"]):
                     text = self.go(*path)
                     for line in text.splitlines():
                         self.assertLessEqual(len(line), cols)

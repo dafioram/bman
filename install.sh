@@ -40,7 +40,7 @@ ask() {
     case "$answer" in
         [Yy]*) return 0 ;;
         [Nn]*) return 1 ;;
-        "") [ "$2" = "Y" ] && return 0 || return 1 ;;
+        "") [ "$2" = "Y" ] ;;
         *) return 1 ;;
     esac
 }
@@ -48,8 +48,9 @@ ask() {
 command -v python3 >/dev/null 2>&1 || die "python3 is required (apt install python3)."
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
     || die "Python 3.9 or newer is required."
-[ -f "$SRC/bman.py" ] && [ -f "$SRC/VERSION" ] && [ -d "$SRC/bmanlib" ] \
-    || die "run it from the bman source folder."
+if [ ! -f "$SRC/bman.py" ] || [ ! -f "$SRC/VERSION" ] || [ ! -d "$SRC/bmanlib" ]; then
+    die "run it from the bman source folder."
+fi
 VERSION=$(cat "$SRC/VERSION")
 
 # Refuse to touch anything at our locations that we did not put there.
@@ -71,7 +72,9 @@ else
 fi
 
 mkdir -p "$PREFIX/bin" "$PREFIX/lib" || die "cannot create folders in $PREFIX (run with sudo?)"
-[ -w "$PREFIX/lib" ] && [ -w "$PREFIX/bin" ] || die "no write access to $PREFIX (run with sudo?)"
+if [ ! -w "$PREFIX/lib" ] || [ ! -w "$PREFIX/bin" ]; then
+    die "no write access to $PREFIX (run with sudo?)"
+fi
 
 # Stage next to the target, check it runs, then swap it in.
 STAGE=$(mktemp -d "$PREFIX/lib/.$APP-stage.XXXXXX")

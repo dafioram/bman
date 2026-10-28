@@ -519,12 +519,30 @@ class Subvol:
         return self.path.rsplit("/", 1)[-1]
 
     @property
+    def is_top(self) -> bool:
+        """The filesystem's top level (id 5): where files live when there are no subvolumes."""
+        return self.id == TOP_ID
+
+    @property
+    def display(self) -> str:
+        return TOP_NAME if self.is_top else self.path
+
+    @property
     def is_snapshot(self) -> bool:
         """Read-only copies of another subvolume. Writable copies count as subvolumes."""
         return bool(self.parent_uuid) and self.readonly
 
     def fingerprint(self) -> Tuple[int, str, str, bool]:
         return (self.id, self.uuid, self.path, self.readonly)
+
+
+TOP_ID = 5
+TOP_NAME = "(top level)"
+
+
+def under(base: str, rel: str) -> str:
+    """A path below a mount of the top level; the top level itself when rel is ''."""
+    return f"{base}/{rel}" if rel else base
 
 
 _SV_KEYS = [
@@ -572,6 +590,11 @@ def parse_default(text: str) -> int:
     """`btrfs subvolume get-default` → subvolume id (5 = top level)."""
     m = re.search(r"ID (\d+)", text)
     return int(m.group(1)) if m else 5
+
+
+def parse_subvol_show_uuid(text: str) -> str:
+    m = re.search(r"^\s*UUID:\s*([0-9a-fA-F-]{36})\s*$", text, re.M)
+    return m.group(1).lower() if m else ""
 
 
 def parse_subvol_show_time(text: str) -> Optional[float]:
@@ -1100,19 +1123,6 @@ def disk_use(d: Disk, members: Dict[str, Tuple[str, str, bool]]) -> DiskUse:
         word = f"has {len(d.parts)} partition{'s' if len(d.parts) != 1 else ''}"
         return DiskUse(f"free, {word}", "warn", True, warn=word)
     return DiskUse("free", "ok", True)
-
-
-# ---------------------------------------------------------------- diskstats
-
-
-def parse_diskstats(text: str) -> Dict[str, Tuple[int, int, int, int]]:
-    """/proc/diskstats → {kname: (reads, sectors read, writes, sectors written)}."""
-    out = {}
-    for line in text.splitlines():
-        f = line.split()
-        if len(f) >= 10 and all(x.isdecimal() for x in (f[3], f[5], f[7], f[9])):
-            out[f[2]] = (int(f[3]), int(f[5]), int(f[7]), int(f[9]))
-    return out
 
 
 def parse_journal_time(line: str) -> Optional[datetime]:

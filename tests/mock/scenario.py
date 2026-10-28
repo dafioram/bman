@@ -1,5 +1,5 @@
-"""Builds the mock system used by the walkthrough: a fake /dev tree, fstab, sysfs and
-diskstats, and a JSON state with the awkward cases: a missing device mounted
+"""Builds the mock system used by the walkthrough: a fake /dev tree, fstab and sysfs,
+and a JSON state with the awkward cases: a missing device mounted
 degraded, chunks that are not mirrored, device errors, a scrub that found errors,
 an unmounted filesystem, a Btrfs root filesystem, nested and snapper-style
 snapshots, a writable copy of a snapshot, quotas on one filesystem, and free,
@@ -20,6 +20,7 @@ U_TANK = "3c5d7a9e-1111-4222-8333-000000000001"
 U_BACKUP = "3c5d7a9e-1111-4222-8333-000000000002"
 U_OLD = "3c5d7a9e-1111-4222-8333-000000000003"
 U_ROOT = "3c5d7a9e-1111-4222-8333-000000000004"
+U_PLAIN = "3c5d7a9e-1111-4222-8333-000000000005"
 
 
 def _disk(name, size, model, serial, by_id, rota=True, tran="sata", parts=None, fstype="", uuid="", label=""):
@@ -62,6 +63,8 @@ def build(root: str) -> dict:
         _disk("sdk", 6 * TB, "ST6000VN001", "ZAD6LVM", "ata-ST6000VN001-2BB186_ZAD6LVM", fstype="LVM2_member"),
         _disk("sdl", 2 * TB, "WDC WD20EARS", "WD-OLDEXT4", "ata-WDC_WD20EARS-00MVWB0_WD-OLDEXT4",
               parts=[{"name": "sdl1", "size": 2 * TB - 2 * MB, "fstype": "ext4", "label": "olddata"}]),
+        _disk("sdn", 8 * TB, "ST8000VN004", "ZA1PLAIN8", "ata-ST8000VN004-2M2101_ZA1PLAIN8",
+              fstype="btrfs", uuid=U_PLAIN, label="plain"),
     ]
     for i, d in enumerate(disks):
         open(os.path.join(root, "dev", d["name"]), "w").close()
@@ -131,6 +134,15 @@ def build(root: str) -> dict:
             "subvols": {"256": _sv("archive", "ffff0256-0000-4000-8000-000000000256", otime=t(900 * day))},
             "dirs": [], "next_id": 257, "default": 5, "quota": "off", "scrub": {}, "balance": {},
         },
+        U_PLAIN: {
+            # A single drive used as is: no subvolumes, mounted at the top level from fstab.
+            "label": "plain",
+            "devices": [{"devid": 1, "k": "sdn", "size": 8 * TB, "used": 3 * TB, "stats": {}}],
+            "profiles": {"data": [["single", 2900 * GB, 2800 * GB]], "metadata": [["dup", 8 * GB, 4 * GB]],
+                         "system": [["dup", 8 * MB, 16384]]},
+            "subvols": {}, "dirs": [], "next_id": 256, "default": 5, "quota": "off", "scrub": {}, "balance": {},
+            "top_uuid": "70700000-0000-4000-8000-000000000005",
+        },
         U_ROOT: {
             "label": "rootfs",
             "devices": [{"devid": 1, "k": "sda2", "size": 499 * GB, "used": 80 * GB, "stats": {}}],
@@ -150,6 +162,8 @@ def build(root: str) -> dict:
          "options": "rw,noatime,compress=zstd:1,space_cache=v2,subvolid=256,subvol=/data", "busy": True},
         {"target": "/srv/media", "uuid": U_TANK, "fsroot": "/media",
          "options": "rw,noatime,compress=zstd:1,space_cache=v2,subvolid=257,subvol=/media"},
+        {"target": "/mnt/plain", "uuid": U_PLAIN, "fsroot": "/",
+         "options": "rw,noatime,compress=zstd:3,space_cache=v2,subvolid=5,subvol=/"},
         {"target": "/srv/backup", "uuid": U_BACKUP, "fsroot": "/hosts",
          "options": "rw,noatime,degraded,compress=zstd:1,space_cache=v2,subvolid=256,subvol=/hosts"},
     ]
@@ -170,12 +184,8 @@ def build(root: str) -> dict:
                 f"UUID={U_TANK}  /srv/tank  btrfs  subvol=/data,noatime,compress=zstd:1,nofail  0  0\n"
                 f"UUID={U_TANK}  /srv/media  btrfs  subvol=/media,noatime,compress=zstd:1,nofail  0  0\n"
                 f"UUID={U_BACKUP}  /srv/backup  btrfs  subvol=/hosts,noatime,nofail  0  0\n"
-                f"UUID={U_OLD}  /mnt/olddisk  btrfs  subvol=/archive,nofail  0  0\n")
-    with open(os.path.join(root, "proc", "diskstats"), "w") as f:
-        for i, d in enumerate(disks):
-            f.write(f"   8 {i * 16:>7} {d['name']} 1000 0 200000 100 2000 0 400000 200 0 300 300\n")
-            for p in d["parts"]:
-                f.write(f"   8 {i * 16 + 1:>7} {p['name']} 500 0 100000 50 900 0 200000 100 0 150 150\n")
+                f"UUID={U_OLD}  /mnt/olddisk  btrfs  subvol=/archive,nofail  0  0\n"
+                f"UUID={U_PLAIN}  /mnt/plain  btrfs  compress=zstd:3,noatime,nofail  0  0\n")
     q = os.path.join(root, "sys", "fs", "btrfs", U_BACKUP, "qgroups")
     os.makedirs(q, exist_ok=True)
     with open(os.path.join(q, "mode"), "w") as f:

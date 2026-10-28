@@ -111,9 +111,15 @@ def fs_view(uuid: str, first: Optional[Msg] = None) -> None:
             rows.append(("Space", f"{fmt_size(fs.bytes_used)} used of {fmt_size(fs.size)}"))
         if fs.user_mounts:
             for i, m in enumerate(fs.user_mounts[:4]):
-                sv = "top level" if not m.subvol else m.subvol
-                extra = ", degraded" if m.degraded else (", read-only" if m.readonly else "")
-                rows.append(("Mounted at" if i == 0 else "", f"{m.target}  ({sv}{extra})"))
+                bits = ["top level" if not m.subvol else m.subvol]
+                comp = m.opt("compress-force") or m.opt("compress")
+                bits.append(f"compress{'-force' if m.opt('compress-force') else ''}={comp}" if comp
+                            else "no compression")
+                if m.degraded:
+                    bits.append("degraded")
+                elif m.readonly:
+                    bits.append("read-only")
+                rows.append(("Mounted at" if i == 0 else "", f"{m.target}  ({', '.join(bits)})"))
             if len(fs.user_mounts) > 4:
                 rows.append(("", (f"and {len(fs.user_mounts) - 4} more", "dim")))
         else:

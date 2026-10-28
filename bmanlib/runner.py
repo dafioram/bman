@@ -51,7 +51,6 @@ class Target:
     bins: Dict[str, str] = field(default_factory=dict)
     by_id_dir: str = "/dev/disk/by-id"
     sys_btrfs: str = "/sys/fs/btrfs"
-    diskstats: str = "/proc/diskstats"
     progs_version: str = ""
     kernel: str = ""
     is_root: bool = False

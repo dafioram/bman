@@ -75,6 +75,29 @@ class SubvolumeDecisions(unittest.TestCase):
         from bmanlib.config import CONFIG
         CONFIG.work_dir = self.old
 
+    def test_top_level_row(self) -> None:
+        top = self.rows[""]
+        self.assertTrue(top.top)
+        self.assertEqual((top.sv.id, top.sv.display), (5, "(top level)"))
+        self.assertEqual(top.state()[0], "not mounted")              # not "default", though it is
+        self.assertIn("top level", SV.delete_blockers(top, [])[0])
+        self.assertNotIn(".snapshots/data/one", [x.path for x in top.nested])
+        self.assertIn("data", [x.path for x in top.nested])
+
+    def test_top_level_snapshots_link_by_folder_or_uuid(self) -> None:
+        fs = self.w.fss[0]
+        subs = self.w.subs["u1"]
+        subs.append(M.Subvol(270, ".snapshots/_top/t1", uuid="T1", parent_uuid="unknown", readonly=True,
+                             fs_uuid="u1"))
+        rows = {r.sv.path: r for r in sv_rows(self.w)}
+        self.assertEqual([x.path for x in rows[""].snaps], [".snapshots/_top/t1"])
+        snaps = {r.sv.path: r for r in sn_rows(self.w)}
+        self.assertEqual(snaps[".snapshots/_top/t1"].source_name, "(top level)")
+        self.w.top_uuid["u1"] = "TOPUUID"
+        subs.append(M.Subvol(271, "elsewhere/t2", uuid="T2", parent_uuid="TOPUUID", readonly=True, fs_uuid="u1"))
+        self.assertEqual(len(sn_rows(self.w, source_uuid="TOPUUID")), 2)
+        self.assertEqual(fs.uuid, "u1")
+
     def test_rows(self) -> None:
         self.assertNotIn(".snapshots/data/one", self.rows)            # snapshots are listed apart
         self.assertIn("copy", self.rows)                              # a writable copy is a subvolume

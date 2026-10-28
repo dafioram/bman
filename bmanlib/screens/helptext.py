@@ -76,7 +76,10 @@ Columns
 SUBVOLUMES = LIST_KEYS + """\
   c        create a new subvolume
 
-Snapshots are listed separately (main menu: Snapshots).
+Snapshots are listed separately (main menu: Snapshots). Each mounted filesystem
+also has a "(top level)" row: its root, where files live when there are no
+subvolumes. It can be snapshotted and has a compression setting, but it can
+never be deleted, renamed or restored over.
 Columns
   STATE    mounted · mounted read-only · not mounted · default (what a plain
            mount of the filesystem shows) · system (your running system lives
@@ -107,13 +110,4 @@ Columns
            bman never offers these.
   TYPE     HDD, SSD or NVMe.
   BY-ID    the stable name bman gives to the btrfs tools.
-"""
-
-IOSTAT = LIST_KEYS + """\
-  a        auto-refresh: redraw every few seconds until Ctrl-C
-
-Each refresh measures the filesystem's devices for one second.
-Columns
-  READ OPS / WRITE OPS   operations per second.
-  READ / WRITE           bytes per second.
 """

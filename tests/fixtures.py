@@ -227,12 +227,6 @@ UUID=other  /mnt/x  ext4  defaults  0  2
 broken
 """
 
-DISKSTATS = """\
-   8       0 sda 1000 0 200000 100 2000 0 400000 200 0 300 300
-   8      16 sdb 50 0 1024 10 70 0 2048 20 0 30 30 0 0 0 0
- 259       0 nvme0n1 x y z
-"""
-
 JOURNAL = """\
 2026-10-27T09:01:12-04:00 host kernel: BTRFS warning (device sdf): devid 2 uuid 1234 is missing
 2026-10-27T09:01:13-04:00 host kernel: BTRFS info (device sdf): allowing degraded mounts

@@ -149,6 +149,13 @@ class Subvolumes(unittest.TestCase):
 
     def test_default_show_qgroups_du(self) -> None:
         self.assertEqual(M.parse_default(F.DEFAULT_TOP), 5)
+        self.assertEqual(M.parse_subvol_show_uuid(F.SUBVOL_SHOW), "1a2b3c4d-0000-4000-8000-000000000256")
+        self.assertEqual(M.parse_subvol_show_uuid("Name: x\nParent UUID: -\n"), "")
+        self.assertEqual(M.under("/mnt/top", ""), "/mnt/top")
+        self.assertEqual(M.under("/mnt/top", "data"), "/mnt/top/data")
+        top = M.Subvol(5, "")
+        self.assertTrue(top.is_top)
+        self.assertEqual(top.display, "(top level)")
         self.assertEqual(M.parse_default(F.DEFAULT_SUB), 256)
         self.assertIsNotNone(M.parse_subvol_show_time(F.SUBVOL_SHOW))
         q = M.parse_qgroups(F.QGROUP_NEW)
@@ -321,10 +328,7 @@ class Disks(unittest.TestCase):
         self.assertEqual(M.disk_use(self.by["sdc"], {"sdc": (F.U1, "tank", False)}).word,
                          "btrfs tank (not mounted)")
 
-    def test_diskstats_and_journal(self) -> None:
-        st = M.parse_diskstats(F.DISKSTATS)
-        self.assertEqual(st["sdb"], (50, 1024, 70, 2048))
-        self.assertNotIn("nvme0n1", st)
+    def test_journal_time(self) -> None:
         self.assertEqual(M.parse_journal_time(F.JOURNAL.splitlines()[0]), datetime(2026, 10, 27, 9, 1, 12))
         self.assertIsNone(M.parse_journal_time("nope"))
 

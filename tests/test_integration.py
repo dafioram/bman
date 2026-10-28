@@ -192,6 +192,23 @@ class RealBtrfs(unittest.TestCase):
         entries = M.parse_fstab(line + "\n")
         self.assertTrue(M.fstab_matches(entries[0], fs.uuid, [], "data"))
 
+    def test_12_top_level_row(self) -> None:
+        from bmanlib.screens.svdata import gather, sn_rows, sv_rows
+        fs = self.fs()
+        self.assertRegex(B.subvol_uuid(self.top), r"^[0-9a-f-]{36}$")
+        sh("mkdir", "-p", f"{self.top}/.snapshots/_top")
+        sh("btrfs", "subvolume", "snapshot", "-r", self.top, f"{self.top}/.snapshots/_top/t1")
+        try:
+            w = gather(only=fs.uuid)
+            top = next(r for r in sv_rows(w) if r.top)
+            self.assertEqual([m.target for m in top.mounts], [self.top])
+            self.assertEqual([s.path for s in top.snaps], [".snapshots/_top/t1"])
+            snap = next(r for r in sn_rows(w) if r.sv.path == ".snapshots/_top/t1")
+            self.assertTrue(snap.source.is_top)
+            self.assertEqual(snap.sv.parent_uuid, w.top_uuid[fs.uuid])   # linked by UUID, not only by folder
+        finally:
+            sh("btrfs", "subvolume", "delete", f"{self.top}/.snapshots/_top/t1")
+
     def test_11_snapshot_delete(self) -> None:
         sh("btrfs", "subvolume", "snapshot", "-r", f"{self.top}/data", f"{self.top}/.snapshots/data/s2")
         subs, _ = B.list_subvols(self.fs())

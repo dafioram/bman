@@ -582,6 +582,14 @@ def sv_delete(s, flags, pos, args):
 def sv_show(s, flags, pos, args):
     fs, uuid, rel = fs_of(s, pos[0])
     sid, sv = sv_by_path(fs, rel)
+    if rel == "":
+        print("/")
+        print("\tName: \t\t\t<FS_TREE>")
+        print(f"\tUUID: \t\t\t{fs.get('top_uuid', '-')}")
+        print("\tParent UUID: \t\t-")
+        print("\tCreation time: \t\t2025-01-01 00:00:00 -0500")
+        print("\tSubvolume ID: \t\t5")
+        return
     if sv is None:
         die(f"ERROR: Not a Btrfs subvolume: {pos[0]}")
     print(rel)
@@ -606,7 +614,7 @@ def sv_default(s, flags, pos, args):
 def prop_get(s, flags, pos, args):
     fs, uuid, rel = fs_of(s, pos[0])
     sid, sv = sv_by_path(fs, rel)
-    c = (sv or {}).get("compression", "")
+    c = fs.get("top_compression", "") if rel == "" else (sv or {}).get("compression", "")
     if c:
         print(f"compression={c}")
 
@@ -616,6 +624,10 @@ def prop_set(s, flags, pos, args):
     value = args[-1] if len(args) >= 3 else ""
     fs, uuid, rel = fs_of(s, path)
     sid, sv = sv_by_path(fs, rel)
+    if rel == "":
+        fs["top_compression"] = value
+        save(s)
+        return
     if sv is None:
         die("ERROR: object is not a subvolume (mock)")
     sv["compression"] = value

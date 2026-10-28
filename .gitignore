@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Test and walkthrough output
+walk-out/
+bman-mock-*/
+*.log
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

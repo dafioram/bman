@@ -35,7 +35,7 @@ def main() -> int:
                "PATH": os.path.join(root, "bin") + os.pathsep + os.environ.get("PATH", "")}
     os.environ.update(env)
     base = runner.Target(by_id_dir=os.path.join(root, "by-id"), sys_btrfs=os.path.join(root, "sys", "fs", "btrfs"),
-                         diskstats=os.path.join(root, "proc", "diskstats"), kernel="6.12.48+deb13-amd64")
+                         kernel="6.12.48+deb13-amd64")
     real_check = runner.startup_check
 
     def check(*a, **kw):

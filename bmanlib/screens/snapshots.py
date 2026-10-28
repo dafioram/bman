@@ -15,7 +15,7 @@ from ..ui import (note, Col, Extra, Fetched, ListView, Msg, Opt, Sort, ask_text,
                   preview, typed_confirm)
 from . import helptext
 from .common import attached, changed, leave_if_done, need_top, quick, report
-from .svdata import SnRow, find_sn, find_sv, gather, sn_rows
+from .svdata import SnRow, find_sn, find_sv, gather, sn_rows, sv_rows
 
 # Sizes measured with `btrfs filesystem du` this session: (fs uuid, subvolume id) -> exclusive bytes.
 MEASURED: Dict[Tuple[str, int], int] = {}
@@ -32,8 +32,8 @@ def snapshots_screen(only: str = "", source_uuid: str = "") -> None:
     title = "Snapshots"
     if source_uuid and only:
         w = gather(only=only, with_quotas=False)
-        src = next((s for s in w.subs.get(only, []) if s.uuid == source_uuid), None)
-        title = f"Snapshots of {src.path}" if src else title
+        src = next((r.sv for r in sv_rows(w) if r.sv.uuid == source_uuid), None)
+        title = f"Snapshots of {src.display}" if src else title
     elif only:
         fs = B.get_fs(only, balance=False)
         title = f"Snapshots on {fs.name}" if fs else title
@@ -167,6 +167,9 @@ def snapshot_view(uuid: str, svid: int) -> None:
 def restore_blockers(r: SnRow) -> List[str]:
     if r.source is None:
         return ["the subvolume it came from no longer exists (Copy to new subvolume instead)."]
+    if r.source.is_top:
+        return ["Btrfs cannot swap out the top level. Open a shell here and copy files back, or "
+                "Copy to new subvolume."]
     _, src = find_sv(r.fs.uuid, r.source.id)
     if src is None:
         return ["the subvolume it came from no longer exists."]
@@ -221,7 +224,7 @@ def restore_flow(msg: Msg, r: SnRow) -> None:
 
 
 def copy_flow(msg: Msg, r: SnRow) -> None:
-    suggestion = f"{r.source.leaf}-{r.sv.leaf}" if r.source else (r.sv.leaf + "-copy")
+    suggestion = (f"{r.source.leaf or 'top'}-{r.sv.leaf}") if r.source else (r.sv.leaf + "-copy")
     print()
     print(paint("The copy is a new, writable subvolume at the top level that starts with the snapshot's files.",
                 "dim"))

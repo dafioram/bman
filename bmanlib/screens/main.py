@@ -16,7 +16,7 @@ def summary(width: int) -> str:
     """The live one-line summary after the app name, with problem counts in red."""
     w = gather(with_quotas=False)
     counts = "Btrfs on this host - " + ", ".join([
-        plural(len(w.fss), "filesystem"), plural(len(sv_rows(w)), "subvolume"),
+        plural(len(w.fss), "filesystem"), plural(len([r for r in sv_rows(w) if not r.top]), "subvolume"),
         plural(len(sn_rows(w)), "snapshot")])
     probs: Dict[str, int] = {}
     for fs in w.fss:
@@ -37,15 +37,15 @@ def summary(width: int) -> str:
 def main_menu() -> None:
     from .disks import disks_screen
     from .filesystems import filesystems_screen
-    from .info import live_io_screen, system_info
+    from .info import system_info
     from .snapshots import snapshots_screen
     from .space import space_screen
     from .subvolumes import subvolumes_screen
 
     targets = {"1": filesystems_screen, "2": subvolumes_screen, "3": snapshots_screen, "4": disks_screen,
-               "5": live_io_screen, "6": space_screen, "7": system_info}
+               "5": space_screen, "6": system_info}
     opts = [Opt("1", "Filesystems"), Opt("2", "Subvolumes"), Opt("3", "Snapshots"), Opt("4", "Disks"),
-            Opt("5", "Live I/O"), Opt("6", "Space & cleanup"), Opt("7", "System info"), Opt("h", "Help")]
+            Opt("5", "Space & cleanup"), Opt("6", "System info"), Opt("h", "Help")]
     msg = Msg()
     while True:
         try:

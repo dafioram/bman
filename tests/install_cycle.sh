@@ -13,7 +13,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 check() { "$@" || fail "$*"; }
 
 # 1. Fresh install.
-"$SRC/install.sh" --yes >/dev/null
+sh "$SRC/install.sh" --yes >/dev/null
 check test -x "$BMAN_PREFIX/bin/bman"
 check test -f "$BMAN_PREFIX/lib/bman/.bman-install-marker"
 check test -f "$BMAN_CONF_DIR/bman.conf"
@@ -29,7 +29,7 @@ echo "$next" > "$copy/VERSION"
 echo "# kept" >> "$BMAN_CONF_DIR/bman.conf"
 
 # 2. Reinstall a newer version in place, from another folder; the config is kept.
-"$copy/install.sh" --yes >/dev/null
+sh "$copy/install.sh" --yes >/dev/null
 v=$("$BMAN_PREFIX/bin/bman" --version)
 [ "$v" = "bman $next" ] || fail "version after reinstall: $v"
 grep -q "# kept" "$BMAN_CONF_DIR/bman.conf" || fail "reinstall replaced the config"
@@ -49,7 +49,7 @@ set -e
 [ "$msg" = "bman is interactive; run it in a terminal." ] || fail "non-terminal message: $msg"
 
 # 4. Uninstall with --purge removes everything it made.
-"$SRC/uninstall.sh" --yes --purge >/dev/null
+sh "$SRC/uninstall.sh" --yes --purge >/dev/null
 [ -e "$BMAN_PREFIX/bin/bman" ] && fail "launcher left behind"
 [ -e "$BMAN_PREFIX/lib/bman" ] && fail "program left behind"
 [ -e "$BMAN_CONF_DIR/bman.conf" ] && fail "config left behind"
@@ -58,26 +58,26 @@ set -e
 mkdir -p "$BMAN_PREFIX/bin"
 echo "#!/bin/sh" > "$BMAN_PREFIX/bin/bman"
 echo "echo someone else's bman" >> "$BMAN_PREFIX/bin/bman"
-if "$SRC/install.sh" --yes >/dev/null 2>&1; then fail "install overwrote a foreign launcher"; fi
+if sh "$SRC/install.sh" --yes >/dev/null 2>&1; then fail "install overwrote a foreign launcher"; fi
 grep -q "someone else" "$BMAN_PREFIX/bin/bman" || fail "foreign launcher was changed"
-if "$SRC/uninstall.sh" --yes >/dev/null 2>&1; then fail "uninstall removed a foreign launcher"; fi
+if sh "$SRC/uninstall.sh" --yes >/dev/null 2>&1; then fail "uninstall removed a foreign launcher"; fi
 check test -f "$BMAN_PREFIX/bin/bman"
 rm "$BMAN_PREFIX/bin/bman"
 
 mkdir -p "$BMAN_PREFIX/lib/bman"
 echo "data" > "$BMAN_PREFIX/lib/bman/important"
-if "$SRC/install.sh" --yes >/dev/null 2>&1; then fail "install overwrote a foreign folder"; fi
+if sh "$SRC/install.sh" --yes >/dev/null 2>&1; then fail "install overwrote a foreign folder"; fi
 check test -f "$BMAN_PREFIX/lib/bman/important"
 rm -rf "$BMAN_PREFIX/lib/bman"
 
 ln -s /tmp "$BMAN_PREFIX/lib/bman"
-if "$SRC/install.sh" --yes >/dev/null 2>&1; then fail "install followed a symlink"; fi
+if sh "$SRC/install.sh" --yes >/dev/null 2>&1; then fail "install followed a symlink"; fi
 rm "$BMAN_PREFIX/lib/bman"
 
 # 6. A config written by someone else is kept even with --purge.
-"$SRC/install.sh" --yes >/dev/null
+sh "$SRC/install.sh" --yes >/dev/null
 echo "[bman]" > "$BMAN_CONF_DIR/bman.conf"
-"$SRC/uninstall.sh" --yes --purge >/dev/null
+sh "$SRC/uninstall.sh" --yes --purge >/dev/null
 check test -f "$BMAN_CONF_DIR/bman.conf"
 
 echo "install cycle: ok"

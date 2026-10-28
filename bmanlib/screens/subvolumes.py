@@ -32,7 +32,7 @@ def subvolumes_screen(only: str = "") -> None:
         return fmt_size(r.sizes[1]) if r.sizes else "-"
 
     cols = [
-        Col("NAME", lambda r: r.sv.path, max=50, min=8, flex=True, want=20),
+        Col("NAME", lambda r: r.sv.display, max=50, min=8, flex=True, want=20),
         Col("FILESYSTEM", lambda r: r.fs.name, max=20, min=6, drop=2),
         Col("STATE", lambda r: r.state()[0], keep=True, style=lambda r: r.state()[1]),
         Col("SNAPS", lambda r: str(len(r.snaps)), right=True, drop=4),
@@ -47,7 +47,7 @@ def subvolumes_screen(only: str = "") -> None:
     if only:
         fs = B.get_fs(only, balance=False)
         title = f"Subvolumes of {fs.name}" if fs else title
-    ListView(title, fetch, cols, sorts, lambda r: f"{r.sv.path} {r.fs.name} {r.state()[0]} {r.sv.uuid}",
+    ListView(title, fetch, cols, sorts, lambda r: f"{r.sv.display} {r.fs.name} {r.state()[0]} {r.sv.uuid}",
              lambda r: subvol_view(r.fs.uuid, r.sv.id),
              extras=[Extra("c", "new subvolume", lambda m: new_subvol_flow(m, only))],
              help_text=helptext.SUBVOLUMES, empty="No subvolumes.").run()
@@ -79,11 +79,13 @@ def subvol_view(uuid: str, svid: int, first: str = "") -> None:
         comp = B.compression_of(path) if path else ""
         word, style = r.state()
         rows: List[Tuple[str, object]] = [("Filesystem", fs.name), ("State", (word, style))]
+        if r.top:
+            rows.insert(0, ("", ("The root of the filesystem: where files live when there are no subvolumes.", "dim")))
         for i, m in enumerate(r.mounts[:4]):
             rows.append(("Mounted at" if i == 0 else "", m.target + ("  (read-only)" if m.readonly else "")))
         rows.append(("Fstab", f"{entries[0].target} ({CONFIG.fstab} line {entries[0].lineno})" if entries
                      else ("no entry; it does not mount at boot", "dim")))
-        mopt = r.mounts[0].opt("compress") if r.mounts else None
+        mopt = (r.mounts[0].opt("compress") or r.mounts[0].opt("compress-force")) if r.mounts else None
         rows.append(("Compression", comp or (f"{mopt} (mount option)" if mopt else "off")))
         if r.sizes:
             if r.simple_quota:
@@ -93,17 +95,17 @@ def subvol_view(uuid: str, svid: int, first: str = "") -> None:
         snaps = sorted(r.snaps, key=lambda s: s.gen)
         rows.append(("Snapshots", f"{len(snaps)}, newest {fmt_ago(snaps[-1].otime)}" if snaps else "none"))
         if r.origin:
-            rows.append(("Copy of", (r.origin.path, "dim")))
+            rows.append(("Copy of", (r.origin.display, "dim")))
         if r.nested:
             rows.append(("Contains", (f"{plural(len(r.nested), 'subvolume')}: "
                                       + ", ".join(x.path for x in r.nested[:3]), "dim")))
-        if r.is_default:
+        if r.is_default and not r.top:
             rows.append(("Default", ("yes: a mount without subvol= shows this subvolume", "dim")))
-        header = item_header(sv.path, f"id {sv.id}", rows)
+        header = item_header(sv.display, f"id {sv.id}", rows)
         blockers = delete_blockers(r, entries)
         if blockers:
             header += note("Delete is not offered: " + blockers[0])
-        renamable = not r.mounted and not r.is_default and not entries
+        renamable = not r.top and not r.mounted and not r.is_default and not entries
         opts = [
             Opt("1", f"Snapshots ({len(snaps)})"),
             Opt("2", "Take snapshot"),
@@ -115,7 +117,7 @@ def subvol_view(uuid: str, svid: int, first: str = "") -> None:
             Opt("8", "Open a shell here"),
             Opt("9", "Rename", "warn", show=renamable),
             Opt("10", f"Filesystem: {fs.name}"),
-            Opt("11", f"Copy of: {r.origin.path}" if r.origin else "Copy of", show=r.origin is not None),
+            Opt("11", f"Copy of: {r.origin.display}" if r.origin else "Copy of", show=r.origin is not None),
             Opt("12", "Raw details"),
             Opt("13", "Delete", "bad", show=not blockers),
         ]
@@ -151,14 +153,14 @@ def subvol_view(uuid: str, svid: int, first: str = "") -> None:
 
 
 def raw_details(fs: M.Fs, path: str) -> None:
-    p = B.path_of(fs, path)
-    if not p:
-        p = need_top(fs, Msg()) + "/" + path
+    p = B.path_of(fs, path) or M.under(need_top(fs, Msg()), path)
     r = run(["btrfs", "subvolume", "show", p])
-    show_text(strip_ctl_block(r.out or r.err), f"Raw details of {path}")
+    show_text(strip_ctl_block(r.out or r.err), f"Raw details of {path or M.TOP_NAME}")
 
 
 def delete_blockers(r: SvRow, entries) -> List[str]:
+    if r.top:
+        return ["it is the top level of the filesystem; it holds everything else."]
     out = []
     if r.system:
         out.append("your running system lives on it.")
@@ -231,13 +233,15 @@ def take_snapshot_flow(msg: Msg, r: SvRow) -> None:
         raise Leave(f"{folder}/{name} already exists.", "warn")
     top = need_top(fs, msg)
     for args in (["mkdir", "-p", f"{top}/{folder}"],
-                 ["btrfs", "subvolume", "snapshot", "-r", f"{top}/{sv.path}", f"{top}/{folder}/{name}"]):
+                 ["btrfs", "subvolume", "snapshot", "-r", M.under(top, sv.path), f"{top}/{folder}/{name}"]):
         if not quick(msg, args):
             return
     msg.ok(f"Done. Took {folder}/{name}")
     if r.nested:
         msg.add(f"Not included: {plural(len(r.nested), 'subvolume')} inside it (snapshots stop at subvolumes).",
                 "dim")
+    elif r.top:
+        msg.add("It covers every file on the filesystem.", "dim")
 
 
 # ---------------------------------------------------------------- mounting and fstab
@@ -247,11 +251,12 @@ def mount_flow(msg: Msg, r: SvRow) -> None:
     from .filesystems import ask_mountpoint, degraded_lines, mount_options, offer_fstab
     fs, sv = r.fs, r.sv
     print()
-    target = ask_mountpoint(f"/mnt/{sv.leaf}")
-    opts = ",".join([f"subvol=/{sv.path}"] + [o for o in mount_options(fs).split(",") if o])
+    target = ask_mountpoint(f"/mnt/{sv.leaf or fs.name}")
+    pick = "subvolid=5" if sv.is_top else f"subvol=/{sv.path}"
+    opts = ",".join([pick] + [o for o in mount_options(fs).split(",") if o])
     steps = [["mkdir", "-p", target], ["mount", "-t", "btrfs", "-o", opts, f"UUID={fs.uuid}", target]]
-    preview(f"Mount {sv.path}", [f"Mounts subvolume {sv.path} of {fs.name} at {target}."] + degraded_lines(fs),
-            steps)
+    what = f"the top level of {fs.name}" if sv.is_top else f"subvolume {sv.path} of {fs.name}"
+    preview(f"Mount {sv.display}", [f"Mounts {what} at {target}."] + degraded_lines(fs), steps)
     if not confirm("Mount it?", not fs.missing_count):
         raise Cancel()
     for s in steps:
@@ -263,14 +268,14 @@ def mount_flow(msg: Msg, r: SvRow) -> None:
 def unmount_flow(msg: Msg, r: SvRow) -> None:
     mounts = r.mounts
     if len(mounts) > 1:
-        i = choose(f"Unmount {r.sv.path} from", [m.target for m in mounts])
+        i = choose(f"Unmount {r.sv.display} from", [m.target for m in mounts])
         if i is None:
             raise Cancel()
         m = mounts[i]
     else:
         m = mounts[0]
     args = ["umount", m.target]
-    lines: List[object] = [f"Unmounts {r.sv.path} from {m.target}. Its files stay on the filesystem."]
+    lines: List[object] = [f"Unmounts {r.sv.display} from {m.target}. Its files stay on the filesystem."]
     if B.fstab_entries(r.fs, r.sv.path, r.sv.id):
         lines.append(("It is in fstab, so it mounts again at the next boot.", "dim"))
     last = len(r.fs.user_mounts) == 1
@@ -281,7 +286,13 @@ def unmount_flow(msg: Msg, r: SvRow) -> None:
     if not confirm(f"Unmount {m.target}?", True):
         raise Cancel()
     if last:
-        need_top(r.fs, msg)
+        # Keep a way in: a private mount of the top level (not the one being unmounted).
+        kept = r.fs.mounts
+        r.fs.mounts = [x for x in kept if x.target != m.target]
+        try:
+            need_top(r.fs, msg)
+        finally:
+            r.fs.mounts = kept
     quick(msg, args, f"Done. Unmounted {m.target}.")
 
 
@@ -294,27 +305,27 @@ def fstab_add_flow(msg: Msg, r: SvRow) -> None:
         opts = ",".join(keep) or CONFIG.mount_options
     else:
         print()
-        target = ask_mountpoint(f"/mnt/{r.sv.leaf}")
+        target = ask_mountpoint(f"/mnt/{r.sv.leaf or r.fs.name}")
         opts = CONFIG.mount_options
     line = M.fstab_line(r.fs.uuid, target, r.sv.path, opts)
-    lines: List[object] = [f"Adds this line to {CONFIG.fstab}, so {r.sv.path} mounts at {target} at boot:",
+    lines: List[object] = [f"Adds this line to {CONFIG.fstab}, so {r.sv.display} mounts at {target} at boot:",
                            ("  " + line, "dim"),
                            "bman backs the file up first and checks the result with findmnt --verify.",
                            ("nofail lets the system boot even when the disks are missing.", "dim")]
     if any(e.target == target for e in M.parse_fstab(B.read_fstab()[0])):
         lines.append((f"{CONFIG.fstab} already mounts something else at {target}.", "bad"))
-    preview(f"Add {r.sv.path} to fstab", lines)
+    preview(f"Add {r.sv.display} to fstab", lines)
     if not confirm("Add it?", True):
         raise Cancel()
     add_fstab_line(msg, r.fs, line)
 
 
 def fstab_remove_flow(msg: Msg, r: SvRow, entries) -> None:
-    lines: List[object] = [f"Comments out {plural(len(entries), 'line')} in {CONFIG.fstab}, so {r.sv.path} no "
+    lines: List[object] = [f"Comments out {plural(len(entries), 'line')} in {CONFIG.fstab}, so {r.sv.display} no "
                            "longer mounts at boot:"]
     lines += [("  " + e.raw.strip(), "dim") for e in entries]
     lines.append("It stays mounted now if it is mounted. bman backs the file up first.")
-    preview(f"Remove {r.sv.path} from fstab", lines)
+    preview(f"Remove {r.sv.display} from fstab", lines)
     if not confirm("Remove it from fstab?", False):
         raise Cancel()
     text, err = B.read_fstab()
@@ -334,21 +345,21 @@ COMPRESSION_CHOICES = [("zstd", "zstd (recommended)"), ("lzo", "lzo (fastest, sa
 def compression_flow(msg: Msg, r: SvRow, current: str) -> None:
     labels = [lab for _, lab in COMPRESSION_CHOICES] + ["Follow the mount option (remove the setting)"]
     cur = next((i for i, (v, _) in enumerate(COMPRESSION_CHOICES) if current.startswith(v)), None)
-    i = choose(f"Compression for {r.sv.path}", labels, cur, explain=[
+    i = choose(f"Compression for {r.sv.display}", labels, cur, explain=[
         "Stored in the filesystem; applies to files written from now on, whatever the mount options.",
         "Existing files stay as they are."])
     if i is None:
         raise Cancel()
     value = COMPRESSION_CHOICES[i][0] if i < len(COMPRESSION_CHOICES) else ""
-    path = B.path_of(r.fs, r.sv.path) or (need_top(r.fs, msg) + "/" + r.sv.path)
+    path = B.path_of(r.fs, r.sv.path) or M.under(need_top(r.fs, msg), r.sv.path)
     args = ["btrfs", "property", "set", path, "compression", value]
-    if not confirm(f"Set compression of {r.sv.path} to {value or 'the mount option'}?", True):
+    if not confirm(f"Set compression of {r.sv.display} to {value or 'the mount option'}?", True):
         raise Cancel()
     quick(msg, args)
 
 
 def shell_flow(msg: Msg, fs: M.Fs, path: str, readonly: bool) -> None:
-    p = B.path_of(fs, path) or (need_top(fs, msg) + "/" + path)
+    p = B.path_of(fs, path) or M.under(need_top(fs, msg), path)
     if not os.path.isdir(p):
         raise Leave(f"Cannot open {p}.", "warn")
     shell = os.environ.get("SHELL") or "/bin/sh"
