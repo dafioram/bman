@@ -2,7 +2,9 @@
 tests can pass a fake one."""
 from __future__ import annotations
 
+import json
 import os
+import stat
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import model as M
@@ -11,13 +13,55 @@ from .runner import TARGET, Result, run, work_path
 
 Runner = Callable[..., Result]
 
-FINDMNT_ARGS = ["findmnt", "-J", "--list", "-t", "btrfs", "-o", "TARGET,SOURCE,FSROOT,OPTIONS,UUID"]
+FINDMNT_ARGS = ["findmnt", "-J", "--list", "-t", "btrfs", "-o", "TARGET,SOURCE,FSROOT,OPTIONS,UUID,ID"]
 LSBLK_COLS = "NAME,KNAME,PATH,SIZE,TYPE,MODEL,SERIAL,ROTA,TRAN,FSTYPE,LABEL,UUID,MOUNTPOINT"
 
 
 def list_mounts(runner: Runner = run) -> List[M.Mount]:
     r = runner(FINDMNT_ARGS)
     return M.parse_findmnt(r.out) if r.ok else []
+
+
+def all_mounts(runner: Runner = run) -> Tuple[List[dict], str]:
+    """Read the full mount table, retaining non-Btrfs and stacked mounts."""
+    r = runner(["findmnt", "-J", "--list", "-o", "TARGET,FSROOT,UUID,ID,FSTYPE,MAJ:MIN"])
+    if not r.ok:
+        return [], r.reason
+    try:
+        rows = json.loads(r.out)["filesystems"]
+        if isinstance(rows, list) and all(isinstance(row, dict) and "target" in row for row in rows):
+            return rows, ""
+    except (ValueError, KeyError, TypeError):
+        pass
+    return [], "could not read the mount table"
+
+
+def mounts_at(path: str, runner: Runner = run) -> Tuple[List[dict], str]:
+    rows, err = all_mounts(runner)
+    target = os.path.realpath(path)
+    return [row for row in rows if row["target"] == target], err
+
+
+def mount_matches(path: str, fs_uuid: str, expected: Optional[M.Mount] = None,
+                  runner: Runner = run, top: bool = False) -> bool:
+    rows, err = mounts_at(path, runner)
+    if err or len(rows) != 1 or path != os.path.realpath(path):
+        return False
+    row = rows[0]
+    if row.get("fstype") != "btrfs" or row.get("uuid") != fs_uuid:
+        return False
+    if top and row.get("fsroot") != "/":
+        return False
+    return expected is None or (row.get("fsroot") == expected.fsroot and
+                                (expected.mount_id is None or M.to_int(row.get("id")) == expected.mount_id))
+
+
+def block_identity(path: str) -> Optional[Tuple[int, int, int]]:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_rdev) if stat.S_ISBLK(st.st_mode) else None
 
 
 def kname_of(path: str) -> str:
@@ -45,7 +89,7 @@ def inventory(runner: Runner = run, details: bool = True) -> Tuple[List[M.Fs], s
     """Every Btrfs filesystem on the machine, mounted or not."""
     r = runner(["btrfs", "filesystem", "show", "--raw"])
     shows = M.parse_fi_show(r.out)
-    err = "" if r.ok or shows else (r.reason if "No btrfs" not in (r.out + r.err) else "")
+    err = "" if r.ok or "No btrfs" in (r.out + r.err) else r.reason
     mounts = list_mounts(runner)
     out = []
     for s in shows:
@@ -112,13 +156,16 @@ def ensure_top(fs: M.Fs, runner: Runner = run) -> Tuple[str, str]:
     work_dir. Returns (path, error)."""
     p = top_path(fs)
     if p:
-        if (p + "/").startswith(CONFIG.work_dir.rstrip("/") + "/"):
+        if p == work_path(fs.uuid):
             TARGET.work_mounts.setdefault(fs.uuid, p)      # left over from an earlier run: clean it up too
         return p, ""
     path = work_path(fs.uuid)
     r = runner(["mkdir", "-p", path])
     if not r.ok:
         return "", f"cannot create {path}: {r.reason}"
+    mounts, err = mounts_at(path, runner)
+    if path != os.path.realpath(path) or mounts or err:
+        return "", f"cannot verify that the working mountpoint {path} is free: {err or 'occupied or aliased'}"
     opts = "subvolid=5" + (",degraded" if fs.missing_count else "")
     r = runner(["mount", "-t", "btrfs", "-o", opts, f"UUID={fs.uuid}", path])
     if not r.ok:
@@ -244,14 +291,16 @@ def replace_status(fs: M.Fs, runner: Runner = run) -> M.ReplaceInfo:
 
 def read_fstab() -> Tuple[str, str]:
     try:
-        with open(CONFIG.fstab, encoding="utf-8", errors="replace") as f:
+        with open(CONFIG.fstab, encoding="utf-8", errors="surrogateescape", newline="") as f:
             return f.read(), ""
     except OSError as e:
         return "", f"cannot read {CONFIG.fstab}: {e.strerror}"
 
 
-def fstab_entries(fs: M.Fs, subvol: Optional[str], subvol_id: Optional[int] = None) -> List[M.FstabEntry]:
-    text, _ = read_fstab()
+def fstab_entries(fs: M.Fs, subvol: Optional[str], subvol_id: Optional[int] = None,
+                  *, text: Optional[str] = None) -> List[M.FstabEntry]:
+    if text is None:
+        text, _ = read_fstab()
     paths = [d.path for d in fs.devices if d.path]
     return [e for e in M.parse_fstab(text)
             if e.fstype in ("btrfs", "auto") and M.fstab_matches(e, fs.uuid, paths, subvol, subvol_id)]

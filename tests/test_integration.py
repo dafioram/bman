@@ -58,13 +58,17 @@ class RealBtrfs(unittest.TestCase):
         cls.data = os.path.join(cls.tmp, "data")
         os.makedirs(cls.top)
         os.makedirs(cls.data)
-        sh("mount", "-t", "btrfs", "-o", "subvolid=5", a, cls.top)
+        from bmanlib.screens.filesystems import CreatePlan
+        plan = CreatePlan(cls.label, M.LAYOUT_BY_KEY["raid1"], [])
+        plan.compression = "zstd:1"
+        top_mount = dict(plan.steps(False))["mount the top level"]
+        sh("mount", "-t", "btrfs", "-o", top_mount[top_mount.index("-o") + 1], a, cls.top)
         sh("btrfs", "subvolume", "create", f"{cls.top}/data")
         sh("mount", "-t", "btrfs", "-o", "subvol=/data,compress=zstd:1", a, cls.data)
         with open(os.path.join(cls.data, "one.txt"), "w") as f:
             f.write("hello\n" * 1000)
-        sh("mkdir", "-p", f"{cls.top}/.snapshots/data")
-        sh("btrfs", "subvolume", "snapshot", "-r", f"{cls.top}/data", f"{cls.top}/.snapshots/data/s1")
+        sh("mkdir", "-p", f"{cls.top}/.snapshots/.bman/data")
+        sh("btrfs", "subvolume", "snapshot", "-r", f"{cls.top}/data", f"{cls.top}/.snapshots/.bman/data/s1")
         with open(os.path.join(cls.data, "two.bin"), "wb") as f:
             f.write(os.urandom(4 * 1024 * 1024))
         sh("sync")
@@ -99,9 +103,9 @@ class RealBtrfs(unittest.TestCase):
         self.assertEqual(M.fs_state(fs), ("ok", "ok"))
         self.assertIn(fs.scrub.state, ("none", "finished"))
         m = next(x for x in fs.mounts if x.target == self.data)
-        # Mount options belong to the whole filesystem: the second mount's compress= is
-        # ignored by the kernel, which is why bman shows what findmnt reports.
         self.assertEqual(m.subvol, "data")
+        self.assertEqual(m.opt("compress"), "zstd:1")
+        self.assertTrue(B.mount_matches(self.top, fs.uuid, top=True))
         self.assertEqual(B.top_path(fs), self.top)
 
     def test_02_subvolumes(self) -> None:
@@ -110,7 +114,7 @@ class RealBtrfs(unittest.TestCase):
         self.assertEqual(err, "")
         by = {s.path: s for s in subs}
         self.assertIn("data", by)
-        snap = by[".snapshots/data/s1"]
+        snap = by[".snapshots/.bman/data/s1"]
         self.assertTrue(snap.readonly and snap.is_snapshot)
         self.assertEqual(snap.parent_uuid, by["data"].uuid)
         self.assertIsNotNone(snap.otime)
@@ -118,7 +122,7 @@ class RealBtrfs(unittest.TestCase):
         self.assertEqual(B.default_subvol(fs), 5)
         self.assertEqual(M.snapshot_maker(snap.path), "bman")
         self.assertIsNotNone(B.subvol_created(f"{self.top}/data"))
-        self.assertEqual(B.path_of(fs, ".snapshots/data/s1"), f"{self.top}/.snapshots/data/s1")
+        self.assertEqual(B.path_of(fs, ".snapshots/.bman/data/s1"), f"{self.top}/.snapshots/.bman/data/s1")
 
     def test_03_property(self) -> None:
         sh("btrfs", "property", "set", self.data, "compression", "zstd")
@@ -127,7 +131,7 @@ class RealBtrfs(unittest.TestCase):
         self.assertEqual(B.compression_of(self.data), "")
 
     def test_04_measure(self) -> None:
-        got = B.measure(f"{self.top}/.snapshots/data/s1")
+        got = B.measure(f"{self.top}/.snapshots/.bman/data/s1")
         self.assertIsNotNone(got)
         self.assertGreater(got[0], 0)
 
@@ -196,26 +200,26 @@ class RealBtrfs(unittest.TestCase):
         from bmanlib.screens.svdata import gather, sn_rows, sv_rows
         fs = self.fs()
         self.assertRegex(B.subvol_uuid(self.top), r"^[0-9a-f-]{36}$")
-        sh("mkdir", "-p", f"{self.top}/.snapshots/_top")
-        sh("btrfs", "subvolume", "snapshot", "-r", self.top, f"{self.top}/.snapshots/_top/t1")
+        sh("mkdir", "-p", f"{self.top}/.snapshots/.bman/_top")
+        sh("btrfs", "subvolume", "snapshot", "-r", self.top, f"{self.top}/.snapshots/.bman/_top/t1")
         try:
             w = gather(only=fs.uuid)
             top = next(r for r in sv_rows(w) if r.top)
             self.assertEqual([m.target for m in top.mounts], [self.top])
-            self.assertEqual([s.path for s in top.snaps], [".snapshots/_top/t1"])
-            snap = next(r for r in sn_rows(w) if r.sv.path == ".snapshots/_top/t1")
+            self.assertEqual([s.path for s in top.snaps], [".snapshots/.bman/_top/t1"])
+            snap = next(r for r in sn_rows(w) if r.sv.path == ".snapshots/.bman/_top/t1")
             self.assertTrue(snap.source.is_top)
             self.assertEqual(snap.sv.parent_uuid, w.top_uuid[fs.uuid])   # linked by UUID, not only by folder
         finally:
-            sh("btrfs", "subvolume", "delete", f"{self.top}/.snapshots/_top/t1")
+            sh("btrfs", "subvolume", "delete", f"{self.top}/.snapshots/.bman/_top/t1")
 
     def test_11_snapshot_delete(self) -> None:
-        sh("btrfs", "subvolume", "snapshot", "-r", f"{self.top}/data", f"{self.top}/.snapshots/data/s2")
+        sh("btrfs", "subvolume", "snapshot", "-r", f"{self.top}/data", f"{self.top}/.snapshots/.bman/data/s2")
         subs, _ = B.list_subvols(self.fs())
-        self.assertIn(".snapshots/data/s2", [s.path for s in subs])
-        sh("btrfs", "subvolume", "delete", f"{self.top}/.snapshots/data/s2")
+        snap = next(s for s in subs if s.path == ".snapshots/.bman/data/s2")
+        sh("btrfs", "subvolume", "delete", "-i", str(snap.id), self.top)
         subs, _ = B.list_subvols(self.fs())
-        self.assertNotIn(".snapshots/data/s2", [s.path for s in subs])
+        self.assertNotIn(".snapshots/.bman/data/s2", [s.path for s in subs])
 
 
 if __name__ == "__main__":

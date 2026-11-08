@@ -217,16 +217,18 @@ class SystemAccess(unittest.TestCase):
     def test_ensure_top_mounts_privately_once(self) -> None:
         fs = M.Fs(uuid=F.U1, mounts=[M.Mount("/srv/tank", F.U1, "/data", "rw")],
                   devices=[M.Dev(1, 1, 0, "/dev/sdb"), M.Dev(2, 0, 0, "", True)])
-        fake = FakeRunner([(["mkdir"], R.Result(0, "", "")), (["mount"], R.Result(0, "", ""))])
+        fake = FakeRunner([(["mkdir"], R.Result(0, "", "")),
+                           (["findmnt"], R.Result(0, '{"filesystems": []}', "")),
+                           (["mount"], R.Result(0, "", ""))])
         old = dict(R.TARGET.work_mounts)
         try:
             path, err = B.ensure_top(fs, fake)
             self.assertEqual(err, "")
             self.assertEqual(path, os.path.join(C.CONFIG.work_dir, F.U1))
-            self.assertIn("subvolid=5,degraded", fake.calls[1])
+            self.assertIn("subvolid=5,degraded", fake.calls[2])
             self.assertEqual(R.TARGET.work_mounts[F.U1], path)
             again, _ = B.ensure_top(fs, fake)
-            self.assertEqual((again, len(fake.calls)), (path, 2))
+            self.assertEqual((again, len(fake.calls)), (path, 3))
         finally:
             R.TARGET.work_mounts.clear()
             R.TARGET.work_mounts.update(old)

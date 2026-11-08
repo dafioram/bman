@@ -168,12 +168,12 @@ class Subvolumes(unittest.TestCase):
         self.assertEqual(M.parse_property("", "compression"), "")
 
     def test_makers_and_names(self) -> None:
-        self.assertEqual(M.snapshot_maker(".snapshots/data/x"), "bman")
+        self.assertEqual(M.snapshot_maker(".snapshots/.bman/data/x"), "bman")
         self.assertEqual(M.snapshot_maker("@/.snapshots/12/snapshot"), "snapper")
         self.assertEqual(M.snapshot_maker("timeshift-btrfs/snapshots/2026-10-27_10-00-01/@"), "Timeshift")
         self.assertEqual(M.snapshot_maker("backups/x"), "other")
-        self.assertEqual(M.snapshot_dir("@home"), ".snapshots/@home")
-        self.assertEqual(M.snapshot_dir(""), ".snapshots/_top")
+        self.assertEqual(M.snapshot_dir("@home"), ".snapshots/.bman/@home")
+        self.assertEqual(M.snapshot_dir(""), ".snapshots/.bman/_top")
         self.assertEqual(M.restore_aside_name("data", datetime(2026, 10, 27, 14, 5)),
                          "data.before-restore-2026-10-27-1405")
         self.assertEqual(M.check_name("@home"), "")

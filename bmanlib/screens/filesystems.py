@@ -1,6 +1,7 @@
 """Filesystems: list, view, create, mount, scrub, balance, quotas, label, wipe."""
 from __future__ import annotations
 
+import os
 import time
 import uuid as uuidlib
 from datetime import datetime
@@ -11,7 +12,7 @@ from .. import fstab as FT
 from .. import model as M
 from ..config import CONFIG
 from ..errors import Back, Cancel, Gone, Leave
-from ..runner import TARGET, run, run_fg, work_path
+from ..runner import TARGET, CommandJob, run, run_fg, start_job, work_path
 from ..textfmt import fmt_ago, fmt_size, fmt_time, plural, strip_ctl, strip_ctl_block
 from ..ui import (Col, Extra, Fetched, ListView, LogSource, Msg, Opt, Sort, ask_text, choose, confirm, emit,
                   item_header, logs_menu, menu, nav, paint, pick_candidates, preview, show_text, typed_confirm,
@@ -135,7 +136,8 @@ def fs_view(uuid: str, first: Optional[Msg] = None) -> None:
             rows.append(("Quotas", q.text()))
         header = item_header(fs.name, fs.uuid, rows)
         scrub = fs.scrub or M.ScrubInfo()
-        bal_active = bool(fs.balance and fs.balance.state != "none")
+        poll_balance(msg, uuid)
+        bal_active = uuid in BALANCE_JOBS or bool(fs.balance and fs.balance.state != "none")
         busy = bal_active or rep.state == "running"
         mixed = bool(fs.usage and fs.usage.mixed())
         opts = [
@@ -210,9 +212,10 @@ def fs_view(uuid: str, first: Optional[Msg] = None) -> None:
 
 def recheck(fs: M.Fs) -> Optional[M.Fs]:
     cur = B.get_fs(fs.uuid, balance=True)
-    if cur is None:
+    if cur is None or not fs.mounts or not B.mount_matches(B.mount_point(fs), fs.uuid, fs.mounts[0]):
         return None
-    if sorted((d.devid, d.path) for d in cur.devices) != sorted((d.devid, d.path) for d in fs.devices):
+    if sorted((d.devid, d.path, d.missing) for d in cur.devices) != \
+            sorted((d.devid, d.path, d.missing) for d in fs.devices):
         return None
     return cur
 
@@ -318,8 +321,40 @@ def scrub_view(uuid: str) -> None:
 # ---------------------------------------------------------------- balance
 
 
+BALANCE_JOBS: Dict[str, CommandJob] = {}
+
+
+def poll_balance(msg: Msg, uuid: str) -> bool:
+    job = BALANCE_JOBS.get(uuid)
+    result = job.result() if job else None
+    if result is None:
+        return False
+    del BALANCE_JOBS[uuid]
+    report(msg, result, "Balance finished.")
+    return True
+
+
+def launch_balance(msg: Msg, fs: M.Fs, args: Sequence[str]) -> None:
+    if fs.uuid in BALANCE_JOBS:
+        msg.warn("A balance command is still running.")
+        return
+    try:
+        BALANCE_JOBS[fs.uuid] = start_job(args)
+    except OSError as e:
+        msg.bad(f"Could not launch balance: {e.strerror}")
+        return
+    msg.add("Balance command submitted. Open Balance progress for its result.", "dim")
+
+
+def stop_tracking_balance(uuid: str) -> None:
+    job = BALANCE_JOBS.pop(uuid, None)
+    if job:
+        job.process.poll()
+        job.output.close()
+
+
 def _bal_args(fs: M.Fs, filters: Sequence[str], force: bool = False) -> List[str]:
-    return ["btrfs", "balance", "start", "--bg"] + (["-f"] if force else []) + list(filters) + [B.mount_point(fs)]
+    return ["btrfs", "balance", "start"] + (["-f"] if force else []) + list(filters) + [B.mount_point(fs)]
 
 
 def reclaim_flow(msg: Msg, fs: M.Fs) -> None:
@@ -338,7 +373,7 @@ def reclaim_flow(msg: Msg, fs: M.Fs) -> None:
     if recheck(fs) is None:
         changed(msg, fs.name, "balanced")
         return
-    quick(msg, args, "Balance started.")
+    launch_balance(msg, fs, args)
 
 
 def convert_flow(msg: Msg, fs: M.Fs) -> None:
@@ -390,7 +425,7 @@ def convert_flow(msg: Msg, fs: M.Fs) -> None:
     if recheck(fs) is None:
         changed(msg, fs.name, "converted")
         return
-    quick(msg, args, "Balance started.")
+    launch_balance(msg, fs, args)
 
 
 def fix_mixed_flow(msg: Msg, fs: M.Fs) -> None:
@@ -417,12 +452,14 @@ def fix_mixed_flow(msg: Msg, fs: M.Fs) -> None:
     if recheck(fs) is None:
         changed(msg, fs.name, "balanced")
         return
-    quick(msg, args, "Balance started.")
+    launch_balance(msg, fs, args)
 
 
 def balance_lines(fs: M.Fs) -> List[str]:
     b = fs.balance or M.BalanceInfo()
     if b.state == "none":
+        if fs.uuid in BALANCE_JOBS:
+            return ["Waiting for the balance command to report its result."]
         return ["No balance is running."]
     out = [f"State:     {b.state}"]
     if b.pct_done is not None:
@@ -441,26 +478,34 @@ def balance_view(uuid: str) -> None:
         title = f"Balance of {fs.name}"
         opts = [Opt("1", "Pause", show=b.state == "running"), Opt("2", "Resume", show=b.state == "paused"),
                 Opt("3", "Stop", "warn", show=b.state != "none"), Opt("a", "Auto-refresh (Ctrl-C stops)")]
+        poll_balance(msg, uuid)
         key = menu([paint(title, "title")] + balance_lines(fs), opts, msg, keys_hint=["Enter refresh"])
-        if key == "1":
-            quick(msg, ["btrfs", "balance", "pause", mp], "Balance paused.", timeout=CONFIG.long_timeout)
+        if key in ("1", "2", "3") and (not fs.mounts or not B.mount_matches(mp, uuid, fs.mounts[0])):
+            changed(msg, fs.name, "modified")
+        elif key == "1":
+            if quick(msg, ["btrfs", "balance", "pause", mp], "Balance paused.", timeout=CONFIG.long_timeout):
+                stop_tracking_balance(uuid)
         elif key == "2":
-            quick(msg, ["btrfs", "balance", "resume", mp], "Balance resumed.")
+            launch_balance(msg, fs, ["btrfs", "balance", "resume", mp])
         elif key == "3":
             if confirm("Stop the balance? Chunks done so far stay converted.", False):
+                if not B.mount_matches(mp, uuid, fs.mounts[0]):
+                    changed(msg, fs.name, "modified")
+                    continue
                 print(paint("Waiting for the current chunk to finish...", "dim"))
-                quick(msg, ["btrfs", "balance", "cancel", mp], "Balance stopped.", timeout=CONFIG.long_timeout)
+                if quick(msg, ["btrfs", "balance", "cancel", mp], "Balance stopped.", timeout=CONFIG.long_timeout):
+                    stop_tracking_balance(uuid)
             else:
                 msg.warn(CANCELLED)
         elif key == "a":
             def lines():
                 f = B.get_fs(uuid, balance=True)
+                done = poll_balance(msg, uuid)
                 if f is None:
                     return ["That filesystem no longer exists."], False
-                return balance_lines(f), bool(f.balance and f.balance.state == "running")
-            end = _auto(title, lines, "Balance finished.")
-            if end:
-                msg.ok(end)
+                return balance_lines(f), not done and (uuid in BALANCE_JOBS or
+                                                       bool(f.balance and f.balance.state == "running"))
+            _auto(title, lines, None)
 
 
 # ---------------------------------------------------------------- stats, quotas, label
@@ -474,8 +519,10 @@ def reset_stats_flow(msg: Msg, fs: M.Fs, device: str) -> None:
                                       ("It repairs nothing; run a scrub to check the data.", "dim")], [args])
     if not confirm("Reset the counters?", True):
         raise Cancel()
-    run_res = run(args)
-    report(msg, run_res)
+    if recheck(fs) is None:
+        changed(msg, what, "reset")
+        return
+    report(msg, run(args))
 
 
 def quota_enable_flow(msg: Msg, fs: M.Fs) -> None:
@@ -495,6 +542,9 @@ def quota_enable_flow(msg: Msg, fs: M.Fs) -> None:
                                            "show once that finishes."], [args])
     if not confirm("Enable quotas?", True):
         raise Cancel()
+    if recheck(fs) is None:
+        changed(msg, fs.name, "modified")
+        return
     quick(msg, args, "Quotas enabled; counting runs in the background.")
 
 
@@ -504,6 +554,9 @@ def quota_disable_flow(msg: Msg, fs: M.Fs) -> None:
                                             "Data is not affected; sizes no longer show."], [args])
     if not confirm("Disable quotas?", False):
         raise Cancel()
+    if recheck(fs) is None:
+        changed(msg, fs.name, "modified")
+        return
     quick(msg, args, "Quotas disabled.")
 
 
@@ -518,6 +571,9 @@ def label_flow(msg: Msg, fs: M.Fs) -> None:
     args = ["btrfs", "filesystem", "label", B.mount_point(fs), new]
     if not confirm(f"Change the label to {new}?", True):
         raise Cancel()
+    if recheck(fs) is None:
+        changed(msg, fs.name, "relabelled")
+        return
     quick(msg, args, f"Done. The label is now {new}.")
 
 
@@ -564,9 +620,30 @@ def ask_mountpoint(default: str) -> str:
     err = M.check_mountpoint(raw)
     if err:
         raise Leave(err, "warn")
-    if any(m.target == raw for m in B.list_mounts()):
-        raise Leave(f"Something is already mounted at {raw}.", "warn")
-    return raw.rstrip("/")
+    target = os.path.realpath(raw)
+    err = mountpoint_problem(target)
+    if err:
+        raise Leave(err, "warn")
+    return target
+
+
+def mountpoint_problem(target: str) -> str:
+    if target != os.path.realpath(target) or target == "/":
+        return f"{target} must be a canonical mountpoint other than /."
+    mounts, err = B.mounts_at(target)
+    if err:
+        return f"Cannot check mounts at {target}: {err}"
+    return f"Something is already mounted at {target}." if mounts else ""
+
+
+def mount_at(msg: Msg, steps: Sequence[Sequence[str]], target: str) -> bool:
+    if not quick(msg, steps[0]):
+        return False
+    err = mountpoint_problem(target)
+    if err:
+        msg.bad(err)
+        return False
+    return quick(msg, steps[1], f"Done. Mounted at {target}.")
 
 
 def mount_options(fs: M.Fs) -> str:
@@ -610,10 +687,8 @@ def mount_fs_flow(msg: Msg, fs: M.Fs) -> None:
     preview(f"Mount {fs.name}", [f"Mounts the {sv_name} of {fs.name} at {target}."] + degraded_lines(fs), steps)
     if not confirm("Mount it?", not fs.missing_count):
         raise Cancel()
-    for s in steps:
-        if not quick(msg, s, f"Done. Mounted at {target}."):
-            return
-    offer_fstab(msg, fs, target, sv_path, opts)
+    if mount_at(msg, steps, target):
+        offer_fstab(msg, fs, target, sv_path, opts)
 
 
 def offer_fstab(msg: Msg, fs: M.Fs, target: str, subvol: Optional[str], opts: str) -> None:
@@ -639,7 +714,7 @@ def add_fstab_line(msg: Msg, fs: M.Fs, line: str) -> bool:
         msg.bad(f"Failed: {err}")
         return False
     new = FT.with_line_added(text, line, f"{fs.name}: added by bman {datetime.now():%Y-%m-%d}")
-    ok, said = FT.replace_fstab(new)
+    ok, said = FT.replace_fstab(new, expected_text=text)
     if ok:
         msg.add(said, "ok")
     else:
@@ -655,13 +730,16 @@ def wipe_flow(msg: Msg, fs: M.Fs) -> None:
         raise Leave(f"{fs.name} is mounted; unmount it first.", "warn")
     disks, _ = B.list_disks()
     present = [d for d in fs.devices if not d.missing]
-    paths = []
+    devices = []
     lines: List[object] = [(f"Erases the Btrfs filesystem {fs.name} and everything on it:", "bad"),
                            "all subvolumes, snapshots and files, on these devices:"]
     for d in present:
         disk, part = B.disk_for_path(d.path, disks)
         dev = (part.by_id or part.path) if part else (disk.dev_path if disk else d.path)
-        paths.append(dev)
+        identity = B.block_identity(dev)
+        if identity is None or identity != B.block_identity(d.path):
+            raise Leave(f"Cannot verify the block device at {dev}.", "bad")
+        devices.append((dev, identity))
         desc = f"  {d.label}  {fmt_size(d.size)}"
         if disk:
             desc += f"  {disk.describe() or disk.media}"
@@ -669,31 +747,49 @@ def wipe_flow(msg: Msg, fs: M.Fs) -> None:
     if fs.missing_count:
         lines.append((f"{plural(fs.missing_count, 'missing device')} cannot be wiped; if it comes back it will "
                       "show up as an incomplete filesystem.", "warn"))
-    entries = B.fstab_entries(fs, None)
+    fstab_text, fstab_error = B.read_fstab()
+    entries = B.fstab_entries(fs, None, text=fstab_text) if not fstab_error else []
     if entries:
         lines.append((f"{CONFIG.fstab} has {plural(len(entries), 'line')} for it; bman offers to comment them out "
                       "afterwards.", "warn"))
-    lines.append(("This cannot be undone.", "bad"))
-    steps: List[Tuple[str, List[str]]] = []
-    if fs.uuid in TARGET.work_mounts:
-        steps.append(("unmount bman's working mount", ["umount", TARGET.work_mounts[fs.uuid]]))
-    steps += [(f"wipe {p}", ["wipefs", "-a", p]) for p in paths]
-    preview(f"Wipe filesystem {fs.name}", lines, [s for _, s in steps])
+    lines.append(("This removes Btrfs signatures. It does not securely erase data.", "warn"))
+    working = TARGET.work_mounts.get(fs.uuid)
+    unmount = ["umount", working] if working else []
+    wipes = [["wipefs", "-a", "-t", "btrfs", "--lock=nonblock", dev] for dev, _ in devices]
+    if not wipes:
+        raise Leave("There are no present devices to wipe.", "warn")
+    preview(f"Wipe filesystem {fs.name}", lines, ([unmount] if unmount else []) + wipes)
     if not typed_confirm(fs.name, "erase it"):
         raise Cancel()
-    cur = B.get_fs(fs.uuid, balance=False)
-    if cur is None or cur.user_mounts or sorted(d.devid for d in cur.devices) != sorted(d.devid for d in fs.devices):
+    cur, err = B.inventory(details=False)
+    current = next((item for item in cur if item.uuid == fs.uuid), None)
+    member_key = lambda d: (d.devid, d.path, d.missing)
+    if err or current is None or sorted(map(member_key, current.devices)) != sorted(map(member_key, fs.devices)) or \
+            any(m.target != working for m in current.mounts):
         changed(msg, fs.name, "wiped")
         return
-    ok, reason = attached(f"Wiping {fs.name}", [], steps)
-    TARGET.work_mounts.pop(fs.uuid, None)
-    if not ok:
-        msg.bad(f"Failed: {reason}")
-        return
+    if working:
+        expected = next((m for m in fs.mounts if m.target == working), None)
+        if expected is None or not B.mount_matches(working, fs.uuid, expected, top=True):
+            changed(msg, fs.name, "wiped")
+            return
+        if not quick(msg, unmount):
+            return
+        TARGET.work_mounts.pop(fs.uuid, None)
+    for cmd, (dev, identity) in zip(wipes, devices):
+        mounts, mount_error = B.all_mounts()
+        devnum = f"{os.major(identity[2])}:{os.minor(identity[2])}"
+        if (mount_error or any(m.get("uuid") == fs.uuid or m.get("maj:min") == devnum for m in mounts)
+                or B.block_identity(dev) != identity):
+            msg.bad(f"Stopped before wiping {dev}: the device or mounts could not be verified.")
+            return
+        if not quick(msg, cmd):
+            return
+    print(paint(f"Removed filesystem {fs.name}", "ok"))
+    wait_enter()
     msg.ok(f"Removed filesystem {fs.name}")
     if entries and confirm(f"Comment out its {plural(len(entries), 'line')} in {CONFIG.fstab}?", True):
-        text, _ = B.read_fstab()
-        good, said = FT.replace_fstab(FT.with_lines_removed(text, [e.lineno for e in entries]))
+        good, said = FT.remove_entries(fstab_text, entries)
         msg.add(said if good else f"Failed: {said}", "ok" if good else "bad")
 
 
@@ -740,8 +836,9 @@ class CreatePlan:
         if "udevadm" in TARGET.bins:
             steps.append(("wait for the new filesystem", ["udevadm", "settle"]))
         if self.subvol:
+            top_options = ",".join(["subvolid=5"] + [o for o in self.options().split(",") if o and o != "ro"])
             steps += [("prepare the top level", ["mkdir", "-p", top]),
-                      ("mount the top level", ["mount", "-t", "btrfs", "-o", "subvolid=5", f"UUID={self.uuid}", top]),
+                      ("mount the top level", ["mount", "-t", "btrfs", "-o", top_options, f"UUID={self.uuid}", top]),
                       (f"create subvolume {self.subvol}", ["btrfs", "subvolume", "create", f"{top}/{self.subvol}"])]
         if self.mountpoint:
             steps += [("create the mountpoint", ["mkdir", "-p", self.mountpoint]),
@@ -859,7 +956,7 @@ def create_setup(msg: Msg, plan: CreatePlan, uses: Dict[str, M.DiskUse]) -> None
                     if err:
                         smsg.warn(err)
                     else:
-                        plan.mountpoint = raw.rstrip("/")
+                        plan.mountpoint = os.path.realpath(raw)
             elif key == "5":
                 cur = [c[0] for c in COMPRESSIONS].index(plan.compression) if plan.compression in \
                     [c[0] for c in COMPRESSIONS] else None
@@ -902,14 +999,18 @@ def run_create(msg: Msg, plan: CreatePlan, uses: Dict[str, M.DiskUse]) -> None:
         print(paint(f"{', '.join(d.name for d in warned)} still hold data or labels (shown above).", "warn"))
         if not typed_confirm("erase", "wipe them anyway"):
             raise Cancel()
-    fss, _ = B.inventory(details=False)
-    if any(f.label == plan.label for f in fss) or not still_free(plan.disks) or \
-            (plan.mountpoint and any(m.target == plan.mountpoint for m in B.list_mounts())):
+    fss, err = B.inventory(details=False)
+    if err or any(f.label == plan.label for f in fss) or not still_free(plan.disks) or \
+            (plan.mountpoint and mountpoint_problem(plan.mountpoint)):
         changed(msg, "The disks, labels or mountpoints", "created")
         return
-    ok, reason = attached(f"Creating filesystem {plan.label}", [], steps)
-    if plan.subvol:
-        TARGET.work_mounts[plan.uuid] = work_path(plan.uuid)
+    def check_step(args: Sequence[str]) -> str:
+        return mountpoint_problem(args[-1]) if args[0] == "mount" else ""
+
+    ok, reason = attached(f"Creating filesystem {plan.label}", [], steps, check=check_step)
+    top = work_path(plan.uuid)
+    if plan.subvol and B.mount_matches(top, plan.uuid, top=True):
+        TARGET.work_mounts[plan.uuid] = top
     if not ok:
         msg.bad(f"Failed: {reason}")
         return

@@ -18,7 +18,7 @@ sys.dont_write_bytecode = True
 
 import scenario  # noqa: E402
 import bmanlib.app as app  # noqa: E402
-from bmanlib import runner  # noqa: E402
+from bmanlib import btrfs, runner  # noqa: E402
 
 
 def main() -> int:
@@ -43,7 +43,18 @@ def main() -> int:
         kw.setdefault("euid", 0)
         return real_check(*a, **kw)
 
+    def mock_block_identity(path):
+        node = os.path.realpath(path)
+        if not node.startswith(os.path.join(root, "dev") + os.sep):
+            return None
+        try:
+            st = os.stat(node)
+        except OSError:
+            return None
+        return st.st_dev, st.st_ino, st.st_rdev
+
     app.startup_check = check
+    btrfs.block_identity = mock_block_identity
     os.environ.setdefault("BMAN_CONFIG", os.path.join(root, "bman.conf"))
     try:
         return app.main(sys.argv[2:] if len(sys.argv) > 2 else [])

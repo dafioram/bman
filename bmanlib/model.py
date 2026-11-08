@@ -453,6 +453,7 @@ class Mount:
     fsroot: str          # subvolume path as /data, or / for the top level
     options: str
     source: str = ""
+    mount_id: Optional[int] = None
 
     @property
     def subvol(self) -> str:
@@ -486,13 +487,13 @@ def parse_findmnt(text: str) -> List[Mount]:
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        target = strip_ctl(it.get("target") or "")
+        target = it.get("target") or ""
         uuid = strip_ctl(it.get("uuid") or "").lower()
         if not target or not uuid:
             continue
-        fsroot = strip_ctl(it.get("fsroot") or "/")
+        fsroot = it.get("fsroot") or "/"
         out.append(Mount(target, uuid, fsroot or "/", strip_ctl(it.get("options") or ""),
-                         strip_ctl(it.get("source") or "")))
+                         it.get("source") or "", to_int(it.get("id"))))
     return out
 
 
@@ -525,7 +526,7 @@ class Subvol:
 
     @property
     def display(self) -> str:
-        return TOP_NAME if self.is_top else self.path
+        return TOP_NAME if self.is_top else path_label(self.path)
 
     @property
     def is_snapshot(self) -> bool:
@@ -534,6 +535,11 @@ class Subvol:
 
     def fingerprint(self) -> Tuple[int, str, str, bool]:
         return (self.id, self.uuid, self.path, self.readonly)
+
+
+def path_label(path: str) -> str:
+    """Make significant whitespace and control characters visible in the UI."""
+    return repr(path) if path != path.strip() or not path.isprintable() else path
 
 
 TOP_ID = 5
@@ -557,14 +563,11 @@ _SV_KEYS = [
 def parse_subvol_list(text: str) -> List[Subvol]:
     """`btrfs subvolume list [-p -c -g -u -q -R -s] PATH`: keys in any order, path last."""
     out = []
-    for raw in text.splitlines():
-        line = strip_ctl(raw)
+    for line in text.split("\n"):
         m = re.search(r"\spath (.*)$", line)
         if not m or not line.startswith("ID "):
             continue
-        path = m.group(1).strip()
-        if path.startswith("<FS_TREE>/"):
-            path = path[len("<FS_TREE>/"):]
+        path = m.group(1)
         head = line[:m.start()]
         vals: Dict[str, str] = {}
         for key, rx in _SV_KEYS:
@@ -630,18 +633,18 @@ def parse_fi_du(text: str) -> Optional[Tuple[int, int]]:
 
 def snapshot_maker(path: str) -> str:
     """Who made a snapshot, guessed from where it lives."""
-    if path.startswith(".snapshots/"):
-        return "bman"
     if re.search(r"(^|/)\.snapshots/\d+/snapshot$", path):
         return "snapper"
     if path.startswith("timeshift-btrfs/"):
         return "Timeshift"
+    if path.startswith(".snapshots/.bman/"):
+        return "bman"
     return "other"
 
 
 def snapshot_dir(subvol_path: str) -> str:
     """Where bman keeps snapshots of a subvolume, relative to the top level."""
-    return f".snapshots/{subvol_path}" if subvol_path else ".snapshots/_top"
+    return f".snapshots/.bman/{subvol_path or '_top'}"
 
 
 def default_snapshot_name(prefix: str, now: datetime) -> str:
@@ -714,8 +717,8 @@ class Fs:
     def user_mounts(self) -> List[Mount]:
         """Mounts other than bman's own working mount."""
         from .config import CONFIG
-        work = CONFIG.work_dir.rstrip("/") + "/"
-        return [m for m in self.mounts if not (m.target + "/").startswith(work)]
+        work = os.path.join(CONFIG.work_dir, self.uuid)
+        return [m for m in self.mounts if m.target != work]
 
     @property
     def any_mount(self) -> Optional[Mount]:
@@ -909,8 +912,21 @@ def fstab_matches(e: FstabEntry, fs_uuid: str, member_paths: Sequence[str], subv
     return subvol.strip("/") == ""      # no subvol option: the default subvolume, usually the top level
 
 
-def fstab_line(fs_uuid: str, target: str, subvol: str, options: str) -> str:
-    opts = [f"subvol=/{subvol.strip('/')}"] if subvol.strip("/") else ["subvolid=5"]
+def check_subvol_mount_path(path: str) -> bool:
+    """True if a subvolume path can be used as a literal mount option."""
+    return bool(path) and path.isprintable() and not any(c.isspace() or c in ',\\"' for c in path)
+
+
+def fstab_line(fs_uuid: str, target: str, subvol: str, options: str,
+               *, subvol_id: Optional[int] = None) -> str:
+    subvol = subvol.strip("/")
+    if not subvol:
+        opts = ["subvolid=5"]
+    elif subvol_id is not None and not check_subvol_mount_path(subvol):
+        opts = [f"subvolid={subvol_id}"]
+    else:
+        opts = [f"subvol=/{subvol}"]
+    target = target.replace("\\", r"\134").replace(" ", r"\040").replace("\t", r"\011")
     opts += [o for o in options.split(",") if o]
     if "nofail" not in opts:
         opts.append("nofail")

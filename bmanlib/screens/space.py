@@ -15,9 +15,6 @@ from .common import changed, need_top
 from .snapshots import size_of
 from .svdata import SnRow, gather, sn_rows
 
-CHUNK = 50
-
-
 def space_screen() -> None:
     msg = Msg()
     while True:
@@ -77,9 +74,9 @@ def reclaim_pick(msg: Msg, fss: Sequence[M.Fs]) -> None:
 
 
 def prune_candidates(rows: Sequence[SnRow]) -> List[SnRow]:
-    """Snapshots bulk pruning may offer: not mounted, not managed by snapper or Timeshift.
+    """Snapshots bulk pruning may offer: unmounted and in bman's reserved namespace.
     Largest first when sizes are known, then oldest first."""
-    ok = [r for r in rows if not r.mounts and r.maker in ("bman", "other")]
+    ok = [r for r in rows if not r.mounts and r.maker == "bman"]
     return sorted(ok, key=lambda r: (-(size_of(r) or 0), r.sv.otime or 0, r.sv.path))
 
 
@@ -90,14 +87,8 @@ def group_by_fs(rows: Sequence[SnRow]) -> "OrderedDict[str, List[SnRow]]":
     return out
 
 
-def delete_commands(rows: Sequence[SnRow], tops: Dict[str, str]) -> List[Tuple[str, List[SnRow], List[str]]]:
-    """(fs uuid, rows, command) per filesystem, CHUNK snapshots per command."""
-    out = []
-    for uuid, items in group_by_fs(rows).items():
-        for i in range(0, len(items), CHUNK):
-            part = items[i:i + CHUNK]
-            out.append((uuid, part, ["btrfs", "subvolume", "delete"] + [f"{tops[uuid]}/{r.sv.path}" for r in part]))
-    return out
+def delete_commands(rows: Sequence[SnRow], tops: Dict[str, str]) -> List[Tuple[SnRow, List[str]]]:
+    return [(r, ["btrfs", "subvolume", "delete", "-i", str(r.sv.id), tops[r.fs.uuid]]) for r in rows]
 
 
 def prune_flow(msg: Msg) -> None:
@@ -105,11 +96,11 @@ def prune_flow(msg: Msg) -> None:
     cands = prune_candidates(sn_rows(w))
     if not cands:
         raise Leave("Nothing to clean up.", "warn")
-    pw = min(50, max(len(r.sv.path) for r in cands))
-    lines = [f"{r.fs.name}: {r.sv.path:<{pw}}  {fmt_size(size_of(r)) if size_of(r) is not None else '-':>7}  "
+    pw = min(50, max(len(r.sv.display) for r in cands))
+    lines = [f"{r.fs.name}: {r.sv.display:<{pw}}  {fmt_size(size_of(r)) if size_of(r) is not None else '-':>7}  "
              f"{fmt_ago(r.sv.otime):>8}" for r in cands]
     picked = pick_candidates("Prune snapshots", lines, [
-        "Snapshots made by snapper or Timeshift, and mounted ones, are not listed.",
+        "Only unmounted snapshots in bman's reserved namespace are listed.",
         "Size is what each frees alone; deleting several can free more. Pick e.g. 1 3-5.",
     ])
     chosen = [cands[i] for i in picked]
@@ -125,31 +116,31 @@ def prune_flow(msg: Msg) -> None:
     out.append(("The subvolumes they came from are not touched. This cannot be undone.", "dim"))
     out.append("")
     for r in chosen[:8]:
-        out.append(f"  {r.fs.name}: {r.sv.path}")
+        out.append(f"  {r.fs.name}: {r.sv.display}")
     if len(chosen) > 8:
         out.append(f"  ... and {len(chosen) - 8} more")
-    preview("Prune snapshots", out, [c for _, _, c in cmds[:2]])
+    preview("Prune snapshots", out, [c for _, c in cmds[:2]])
     if len(cmds) > 2:
         print(paint(f"... and {len(cmds) - 2} more commands like these", "dim"))
     n = str(len(chosen))
     if not typed_confirm(n, f"delete {plural(len(chosen), 'snapshot')}"):
         raise Cancel()
-    again = {(r.fs.uuid, r.sv.id): r for r in sn_rows(gather(with_quotas=False))}
+    again = {(r.fs.uuid, r.sv.id): r for r in prune_candidates(sn_rows(gather(with_quotas=False)))}
     for r in chosen:
         cur = again.get((r.fs.uuid, r.sv.id))
         if cur is None or cur.sv.fingerprint() != r.sv.fingerprint() or cur.mounts:
-            changed(msg, r.sv.path, "removed")
+            changed(msg, r.sv.display, "removed")
             return
     removed = 0
-    failures = []
-    for uuid, rows, cmd in cmds:
-        print(paint(f"Deleting {plural(len(rows), 'snapshot')} on {rows[0].fs.name}...", "dim"))
+    for r, cmd in cmds:
+        top = tops[r.fs.uuid]
+        if (not B.mount_matches(top, r.fs.uuid, top=True) or not r.sv.uuid
+                or B.subvol_uuid(M.under(top, r.sv.path)) != r.sv.uuid):
+            msg.bad(f"Removed {plural(removed, 'snapshot')}; could not verify {r.sv.display}.")
+            return
         res = run(cmd, timeout=CONFIG.long_timeout)
-        if res.ok:
-            removed += len(rows)
-        else:
-            failures.append(f"{rows[0].fs.name}: {res.reason}")
-    if failures:
-        msg.bad(f"Removed {plural(removed, 'snapshot')}; failed: {failures[0]}")
-    else:
-        msg.ok(f"Removed {plural(removed, 'snapshot')}")
+        if not res.ok:
+            msg.bad(f"Removed {plural(removed, 'snapshot')}; {r.sv.display}: {res.reason}")
+            return
+        removed += 1
+    msg.ok(f"Removed {plural(removed, 'snapshot')}")

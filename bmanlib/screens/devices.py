@@ -187,7 +187,7 @@ def add_device_flow(msg: Msg, fs: M.Fs) -> None:
     preview(f"Add a device to {fs.name}", lines, [args])
     if not typed_confirm(new.name, "erase it and add it"):
         raise Cancel()
-    if not still_free([new]) or B.get_fs(fs.uuid, balance=False) is None:
+    if not still_free([new]) or not fs.mounts or not B.mount_matches(args[-1], fs.uuid, fs.mounts[0]):
         changed(msg, f"{new.name} or {fs.name}", "added")
         return
     quick(msg, args, f"Done. Added {new.name} to {fs.name}.")
@@ -220,7 +220,8 @@ def replace_flow(msg: Msg, uuid: str, devid: int) -> None:
         raise Cancel()
     cur = B.get_fs(uuid, balance=False)
     cd = next((x for x in cur.devices if x.devid == devid), None) if cur else None
-    if cd is None or cd.path != d.path or not still_free([new]):
+    if (cd is None or (cd.path, cd.missing) != (d.path, d.missing) or not still_free([new])
+            or not fs.mounts or not B.mount_matches(args[-1], uuid, fs.mounts[0])):
         changed(msg, f"devid {devid} or {new.name}", "replaced")
         return
     if report(msg, run(args), "Replace started."):
@@ -251,7 +252,11 @@ def replace_view(uuid: str) -> None:
         key = menu([paint(title, "title")] + replace_lines(r), opts, msg, keys_hint=["Enter refresh"])
         if key == "1":
             if confirm("Cancel the replace? The old device stays in use.", False):
-                quick(msg, ["btrfs", "replace", "cancel", B.mount_point(fs)], "Replace canceled.")
+                target = B.mount_point(fs)
+                if fs.mounts and B.mount_matches(target, uuid, fs.mounts[0]):
+                    quick(msg, ["btrfs", "replace", "cancel", target], "Replace canceled.")
+                else:
+                    changed(msg, fs.name, "modified")
         elif key == "a":
             try:
                 while True:
@@ -287,7 +292,8 @@ def remove_flow(msg: Msg, uuid: str, devid: int) -> None:
     if not confirm(f"Remove {d.label}?", False):
         raise Cancel()
     cur = B.get_fs(uuid, balance=False)
-    if cur is None or not any(x.devid == devid and x.path == d.path for x in cur.devices):
+    if (cur is None or not any(x.devid == devid and x.path == d.path and not x.missing for x in cur.devices)
+            or not fs.mounts or not B.mount_matches(args[-1], uuid, fs.mounts[0])):
         changed(msg, d.label, "removed")
         return
     ok, reason = attached(f"Removing {d.label} from {fs.name}", ["Moving data off the device..."],
@@ -300,7 +306,7 @@ def remove_missing_flow(msg: Msg, uuid: str, devid: int) -> None:
     reasons = M.remove_device_check(fs, devid)
     if reasons:
         raise Leave(reasons[0], "warn")
-    args = ["btrfs", "device", "remove", "missing", B.mount_point(fs)]
+    args = ["btrfs", "device", "remove", str(devid), B.mount_point(fs)]
     preview(f"Remove the missing device of {fs.name}", [
         "Rebuilds the copies that were on the missing device onto the remaining devices,",
         "then drops it from the filesystem. Use this instead of Replace when you will not",
@@ -308,6 +314,11 @@ def remove_missing_flow(msg: Msg, uuid: str, devid: int) -> None:
     ], [args])
     if not confirm("Remove the missing device?", False):
         raise Cancel()
+    cur = B.get_fs(uuid, balance=False)
+    if (cur is None or not any(x.devid == devid and x.missing for x in cur.devices)
+            or not fs.mounts or not B.mount_matches(args[-1], uuid, fs.mounts[0])):
+        changed(msg, d.label, "removed")
+        return
     ok, reason = attached(f"Removing the missing device of {fs.name}", [], [("device remove missing", args)])
     msg.ok("Removed the missing device") if ok else msg.bad(f"Failed: {reason}")
 
@@ -319,4 +330,9 @@ def grow_flow(msg: Msg, uuid: str, devid: int) -> None:
             [args])
     if not confirm("Grow it?", True):
         raise Cancel()
+    cur = B.get_fs(uuid, balance=False)
+    if (cur is None or not any(x.devid == devid and x.path == d.path and not x.missing for x in cur.devices)
+            or not fs.mounts or not B.mount_matches(args[-1], uuid, fs.mounts[0])):
+        changed(msg, d.label, "resized")
+        return
     quick(msg, args)

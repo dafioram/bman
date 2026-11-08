@@ -21,7 +21,7 @@ def strip_ctl(text: object) -> str:
     for ch in s:
         if ch == "\t":
             out.append(" ")
-        elif ch in _BIDI or unicodedata.category(ch) == "Cc":
+        elif ch in _BIDI or unicodedata.category(ch) in ("Cc", "Cs"):
             continue
         else:
             out.append(ch)

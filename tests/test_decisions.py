@@ -55,7 +55,7 @@ def world() -> World:
         M.Subvol(257, "@root", uuid="R", fs_uuid="u1"),
         M.Subvol(258, "media", uuid="B", fs_uuid="u1"),
         M.Subvol(259, "media/inner", uuid="C", fs_uuid="u1"),
-        M.Subvol(260, ".snapshots/data/one", uuid="S1", parent_uuid="A", readonly=True, otime=1.0, fs_uuid="u1"),
+        M.Subvol(260, ".snapshots/.bman/data/one", uuid="S1", parent_uuid="A", readonly=True, otime=1.0, fs_uuid="u1"),
         M.Subvol(261, "@root/.snapshots/1/snapshot", uuid="S2", parent_uuid="R", readonly=True, otime=2.0,
                  fs_uuid="u1"),
         M.Subvol(262, "copy", uuid="D", parent_uuid="S1", fs_uuid="u1"),
@@ -81,7 +81,7 @@ class SubvolumeDecisions(unittest.TestCase):
         self.assertEqual((top.sv.id, top.sv.display), (5, "(top level)"))
         self.assertEqual(top.state()[0], "not mounted")              # not "default", though it is
         self.assertIn("top level", SV.delete_blockers(top, [])[0])
-        self.assertNotIn(".snapshots/data/one", [x.path for x in top.nested])
+        self.assertNotIn(".snapshots/.bman/data/one", [x.path for x in top.nested])
         self.assertIn("data", [x.path for x in top.nested])
 
     def test_top_level_snapshots_link_by_folder_or_uuid(self) -> None:
@@ -99,9 +99,9 @@ class SubvolumeDecisions(unittest.TestCase):
         self.assertEqual(fs.uuid, "u1")
 
     def test_rows(self) -> None:
-        self.assertNotIn(".snapshots/data/one", self.rows)            # snapshots are listed apart
+        self.assertNotIn(".snapshots/.bman/data/one", self.rows)            # snapshots are listed apart
         self.assertIn("copy", self.rows)                              # a writable copy is a subvolume
-        self.assertEqual(self.rows["copy"].origin.path, ".snapshots/data/one")
+        self.assertEqual(self.rows["copy"].origin.path, ".snapshots/.bman/data/one")
         self.assertEqual(len(self.rows["data"].snaps), 1)
         self.assertEqual([x.path for x in self.rows["media"].nested], ["media/inner"])
         self.assertTrue(self.rows["media"].is_default)
@@ -125,20 +125,21 @@ class SubvolumeDecisions(unittest.TestCase):
     def test_snapshot_rows_and_prune(self) -> None:
         snaps = sn_rows(self.w)
         self.assertEqual({r.sv.path: r.maker for r in snaps},
-                         {".snapshots/data/one": "bman", "@root/.snapshots/1/snapshot": "snapper"})
+                         {".snapshots/.bman/data/one": "bman", "@root/.snapshots/1/snapshot": "snapper"})
         self.assertEqual(next(r for r in snaps if r.maker == "bman").source_name, "data")
         cands = SP.prune_candidates(snaps)
-        self.assertEqual([r.sv.path for r in cands], [".snapshots/data/one"])   # snapper's are left alone
+        self.assertEqual([r.sv.path for r in cands], [".snapshots/.bman/data/one"])   # snapper's are left alone
         self.assertEqual(len(sn_rows(self.w, source_uuid="R")), 1)
 
-    def test_delete_commands_group_and_chunk(self) -> None:
+    def test_delete_commands_target_ids(self) -> None:
         fs = self.w.fss[0]
-        rows = [SnRow(fs, M.Subvol(300 + i, f".snapshots/data/s{i}", fs_uuid="u1"), None, "bman", [], None)
-                for i in range(SP.CHUNK + 3)]
-        cmds = SP.delete_commands(rows, {"u1": "/top"})
-        self.assertEqual(len(cmds), 2)
-        self.assertEqual(cmds[0][2][:4], ["btrfs", "subvolume", "delete", "/top/.snapshots/data/s0"])
-        self.assertEqual(len(cmds[1][1]), 3)
+        rows = [SnRow(fs, M.Subvol(300 + i, ".snapshots/.bman/data/name ", fs_uuid="u1"),
+                      None, "bman", [], None) for i in range(2)]
+        self.assertEqual([cmd for _, cmd in SP.delete_commands(rows, {"u1": "/top"})], [
+            ["btrfs", "subvolume", "delete", "-i", "300", "/top"],
+            ["btrfs", "subvolume", "delete", "-i", "301", "/top"],
+        ])
+
 
 
 class CreatePlan(unittest.TestCase):

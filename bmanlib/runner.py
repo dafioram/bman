@@ -9,8 +9,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import BinaryIO, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .config import CONFIG
 from .textfmt import strip_ctl
@@ -111,16 +112,14 @@ def run(args: Sequence[str], timeout: Optional[float] = None, cwd: Optional[str]
         p = subprocess.run(
             argv,
             stdin=subprocess.DEVNULL if input is None else None,
-            input=input,
+            input=input.encode("utf-8", "surrogateescape") if input is not None else None,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=limit,
             cwd=cwd,
             env=capture_env(),
         )
-        return Result(p.returncode, p.stdout, p.stderr)
+        return Result(p.returncode, p.stdout.decode("utf-8", "surrogateescape"),
+                      p.stderr.decode("utf-8", "surrogateescape"))
     except FileNotFoundError:
         return Result(127, "", f"{args[0]}: command not found")
     except subprocess.TimeoutExpired:
@@ -129,6 +128,33 @@ def run(args: Sequence[str], timeout: Optional[float] = None, cwd: Optional[str]
         return Result(130, "", "Interrupted.")
     except OSError as e:
         return Result(126, "", f"{args[0]}: {e.strerror or e}")
+
+
+@dataclass
+class CommandJob:
+    process: subprocess.Popen
+    output: BinaryIO
+
+    def result(self) -> Optional[Result]:
+        rc = self.process.poll()
+        if rc is None:
+            return None
+        self.output.seek(0)
+        text = self.output.read().decode("utf-8", "replace")
+        self.output.close()
+        return Result(rc, text, "")
+
+
+def start_job(args: Sequence[str]) -> CommandJob:
+    output = tempfile.TemporaryFile()
+    try:
+        process = subprocess.Popen(_resolve(args), stdin=subprocess.DEVNULL, stdout=output,
+                                   stderr=subprocess.STDOUT, start_new_session=True, env=capture_env())
+    except BaseException:
+        output.close()
+        raise
+    return CommandJob(process, output)
+
 
 
 def _noop(signum: int, frame: object) -> None:  # pragma: no cover - signal handler
@@ -230,8 +256,12 @@ def work_path(uuid: str) -> str:
 
 def cleanup_work_mounts(runner: Callable[..., Result] = run) -> List[str]:
     """Unmount what bman mounted for itself. Returns problems (shown on exit)."""
+    from .btrfs import mount_matches
     problems = []
     for uuid, path in list(TARGET.work_mounts.items()):
+        if not mount_matches(path, uuid, runner=runner, top=True):
+            problems.append(f"Could not verify the working mount at {path}.")
+            continue
         r = runner(["umount", path])
         if r.ok:
             try:

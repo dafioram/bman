@@ -98,7 +98,7 @@ def subvol_view(uuid: str, svid: int, first: str = "") -> None:
             rows.append(("Copy of", (r.origin.display, "dim")))
         if r.nested:
             rows.append(("Contains", (f"{plural(len(r.nested), 'subvolume')}: "
-                                      + ", ".join(x.path for x in r.nested[:3]), "dim")))
+                                      + ", ".join(x.display for x in r.nested[:3]), "dim")))
         if r.is_default and not r.top:
             rows.append(("Default", ("yes: a mount without subvol= shows this subvolume", "dim")))
         header = item_header(sv.display, f"id {sv.id}", rows)
@@ -232,6 +232,13 @@ def take_snapshot_flow(msg: Msg, r: SvRow) -> None:
     if any(s.path == f"{folder}/{name}" for s in subs):
         raise Leave(f"{folder}/{name} already exists.", "warn")
     top = need_top(fs, msg)
+    source = M.under(top, sv.path)
+    if (not B.mount_matches(top, fs.uuid, top=True) or
+            (not sv.is_top and (not sv.uuid or B.subvol_uuid(source) != sv.uuid))):
+        changed(msg, sv.display, "snapshotted")
+        return
+    if os.path.realpath(f"{top}/{folder}") != f"{top}/{folder}":
+        raise Leave("The snapshot directory resolves to a different path.", "warn")
     for args in (["mkdir", "-p", f"{top}/{folder}"],
                  ["btrfs", "subvolume", "snapshot", "-r", M.under(top, sv.path), f"{top}/{folder}/{name}"]):
         if not quick(msg, args):
@@ -248,21 +255,19 @@ def take_snapshot_flow(msg: Msg, r: SvRow) -> None:
 
 
 def mount_flow(msg: Msg, r: SvRow) -> None:
-    from .filesystems import ask_mountpoint, degraded_lines, mount_options, offer_fstab
+    from .filesystems import ask_mountpoint, degraded_lines, mount_at, mount_options, offer_fstab
     fs, sv = r.fs, r.sv
     print()
     target = ask_mountpoint(f"/mnt/{sv.leaf or fs.name}")
-    pick = "subvolid=5" if sv.is_top else f"subvol=/{sv.path}"
+    pick = f"subvol=/{sv.path}" if M.check_subvol_mount_path(sv.path) else f"subvolid={sv.id}"
     opts = ",".join([pick] + [o for o in mount_options(fs).split(",") if o])
     steps = [["mkdir", "-p", target], ["mount", "-t", "btrfs", "-o", opts, f"UUID={fs.uuid}", target]]
     what = f"the top level of {fs.name}" if sv.is_top else f"subvolume {sv.path} of {fs.name}"
     preview(f"Mount {sv.display}", [f"Mounts {what} at {target}."] + degraded_lines(fs), steps)
     if not confirm("Mount it?", not fs.missing_count):
         raise Cancel()
-    for s in steps:
-        if not quick(msg, s, f"Done. Mounted at {target}."):
-            return
-    offer_fstab(msg, fs, target, sv.path, opts)
+    if mount_at(msg, steps, target) and (sv.is_top or pick.startswith("subvol=")):
+        offer_fstab(msg, fs, target, sv.path, opts)
 
 
 def unmount_flow(msg: Msg, r: SvRow) -> None:
@@ -293,6 +298,9 @@ def unmount_flow(msg: Msg, r: SvRow) -> None:
             need_top(r.fs, msg)
         finally:
             r.fs.mounts = kept
+    if not B.mount_matches(m.target, r.fs.uuid, m):
+        changed(msg, m.target, "unmounted")
+        return
     quick(msg, args, f"Done. Unmounted {m.target}.")
 
 
@@ -307,7 +315,7 @@ def fstab_add_flow(msg: Msg, r: SvRow) -> None:
         print()
         target = ask_mountpoint(f"/mnt/{r.sv.leaf or r.fs.name}")
         opts = CONFIG.mount_options
-    line = M.fstab_line(r.fs.uuid, target, r.sv.path, opts)
+    line = M.fstab_line(r.fs.uuid, target, r.sv.path, opts, subvol_id=r.sv.id)
     lines: List[object] = [f"Adds this line to {CONFIG.fstab}, so {r.sv.display} mounts at {target} at boot:",
                            ("  " + line, "dim"),
                            "bman backs the file up first and checks the result with findmnt --verify.",
@@ -321,6 +329,9 @@ def fstab_add_flow(msg: Msg, r: SvRow) -> None:
 
 
 def fstab_remove_flow(msg: Msg, r: SvRow, entries) -> None:
+    text, err = B.read_fstab()
+    if err:
+        raise Leave(f"Failed: {err}", "bad")
     lines: List[object] = [f"Comments out {plural(len(entries), 'line')} in {CONFIG.fstab}, so {r.sv.display} no "
                            "longer mounts at boot:"]
     lines += [("  " + e.raw.strip(), "dim") for e in entries]
@@ -328,10 +339,7 @@ def fstab_remove_flow(msg: Msg, r: SvRow, entries) -> None:
     preview(f"Remove {r.sv.display} from fstab", lines)
     if not confirm("Remove it from fstab?", False):
         raise Cancel()
-    text, err = B.read_fstab()
-    if err:
-        raise Leave(f"Failed: {err}", "bad")
-    ok, said = FT.replace_fstab(FT.with_lines_removed(text, [e.lineno for e in entries]))
+    ok, said = FT.remove_entries(text, entries)
     msg.set(said if ok else f"Failed: {said}", "ok" if ok else "bad")
 
 
@@ -391,7 +399,9 @@ def rename_flow(msg: Msg, r: SvRow) -> None:
     if not confirm(f"Rename to {new}?", False):
         raise Cancel()
     _, cur = find_sv(r.fs.uuid, r.sv.id)
-    if cur is None or cur.sv.path != r.sv.path or cur.mounted:
+    if (cur is None or cur.sv.fingerprint() != r.sv.fingerprint() or cur.mounted
+            or not B.mount_matches(top, r.fs.uuid, top=True) or not r.sv.uuid
+            or B.subvol_uuid(M.under(top, r.sv.path)) != r.sv.uuid):
         changed(msg, r.sv.path, "renamed")
         return
     quick(msg, args, f"Done. Renamed to {new}.")
@@ -403,8 +413,9 @@ def delete_flow(msg: Msg, r: SvRow) -> None:
     if blockers:
         raise Leave("bman will not delete it: " + blockers[0], "warn")
     top = need_top(r.fs, msg)
-    args = ["btrfs", "subvolume", "delete", f"{top}/{r.sv.path}"]
-    lines: List[object] = [(f"Deletes subvolume {r.sv.path} of {r.fs.name} and every file in it.", "bad")]
+    args = ["btrfs", "subvolume", "delete", "-i", str(r.sv.id), top]
+    label = r.sv.display
+    lines: List[object] = [(f"Deletes subvolume {label} of {r.fs.name} and every file in it.", "bad")]
     if r.sizes and not r.simple_quota:
         lines.append(f"Frees about {fmt_size(r.sizes[1])}; the space comes back gradually in the background.")
     if r.snaps:
@@ -412,12 +423,14 @@ def delete_flow(msg: Msg, r: SvRow) -> None:
     else:
         lines.append(("It has no snapshots: nothing of it remains.", "warn"))
     lines.append(("This cannot be undone.", "bad"))
-    preview(f"Delete {r.sv.path}", lines, [args])
-    if not typed_confirm(r.sv.leaf, f"delete {r.sv.path}"):
+    preview(f"Delete {label}", lines, [args])
+    if not typed_confirm(M.path_label(r.sv.leaf), f"delete {label}"):
         raise Cancel()
     _, cur = find_sv(r.fs.uuid, r.sv.id)
     if cur is None or cur.sv.fingerprint() != r.sv.fingerprint() or \
-            delete_blockers(cur, B.fstab_entries(cur.fs, cur.sv.path, cur.sv.id)):
-        changed(msg, r.sv.path, "deleted")
+            delete_blockers(cur, B.fstab_entries(cur.fs, cur.sv.path, cur.sv.id)) or \
+            not B.mount_matches(top, r.fs.uuid, top=True) or \
+            not r.sv.uuid or B.subvol_uuid(M.under(top, r.sv.path)) != r.sv.uuid:
+        changed(msg, label, "deleted")
         return
-    report(msg, run(args), f"Removed subvolume {r.sv.path}")
+    report(msg, run(args), f"Removed subvolume {label}")

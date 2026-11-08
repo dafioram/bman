@@ -394,7 +394,8 @@ def balance(s, flags, pos, args, action):
             if len([d for d in fs["devices"] if not d.get("missing")]) < need:
                 die("ERROR: error during balancing: Invalid argument")
         fs["balance"] = {"state": "running", "pct": 0.0, "conv": conv}
-        print("Starting balance in the background")
+        if "--bg" in flags:
+            print("Starting balance in the background")
     elif action == "status":
         if not b or b.get("state") == "none":
             print(f"No balance found on '{pos[-1]}'")
@@ -419,6 +420,12 @@ def balance(s, flags, pos, args, action):
     elif action == "cancel":
         fs["balance"] = {}
     save(s)
+    if action in ("start", "resume") and "--bg" not in flags:
+        while True:
+            time.sleep(0.1)
+            current = load()["filesystems"].get(uuid, {}).get("balance") or {}
+            if current.get("state") != "running":
+                break
 
 
 def finish_balance(fs):
@@ -565,6 +572,13 @@ def sv_snapshot(s, flags, pos, args):
 
 
 def sv_delete(s, flags, pos, args):
+    if "-i" in args:
+        top = args[-1]
+        fs, _, _ = fs_of(s, top)
+        sv = fs["subvols"].get(args[args.index("-i") + 1])
+        if sv is None:
+            die("ERROR: No such subvolume ID")
+        pos = [f"{top}/{sv['path']}"]
     for path in pos:
         fs, uuid, rel = fs_of(s, path)
         sid, sv = sv_by_path(fs, rel)
@@ -796,10 +810,13 @@ def cmd_findmnt(argv):
         sys.exit(1 if errors else 0)
     s = load()
     fss = []
-    for m in s["mounts"]:
+    for idx, m in enumerate(s["mounts"], start=1):
         k = next((d["k"] for d in s["filesystems"][m["uuid"]]["devices"] if not d.get("missing")), "?")
         fss.append({"target": m["target"], "source": f"{dev_path(k)}[{m['fsroot']}]", "fsroot": m["fsroot"],
-                    "options": m["options"], "uuid": m["uuid"]})
+                    "options": m["options"], "uuid": m["uuid"], "fstype": "btrfs",
+                    "id": m.get("id", 100 + idx)})
+    if "-t" not in argv:
+        fss.append({"target": "/proc", "fstype": "proc", "fsroot": "/", "id": 99, "uuid": None})
     if not fss:
         sys.exit(1)
     print(json.dumps({"filesystems": fss}, indent=3))

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import shlex
 from datetime import datetime
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from ..runner import Result, hint_for, run, run_fg
 from ..textfmt import strip_ctl
-from ..ui import Msg, confirm, emit, paint, show_command, wait_enter
+from ..ui import Msg, emit, paint, show_command, wait_enter
 
 CANCELLED = "Cancelled. Nothing was changed."
 
@@ -41,29 +41,24 @@ def changed(msg: Msg, what: str, done_word: str) -> None:
 
 
 def attached(title: str, explain: Sequence[str], steps: Sequence[Tuple[str, Sequence[str]]],
-             ask_first: bool = False, default: bool = True) -> Tuple[bool, str]:
+             check: Optional[Callable[[Sequence[str]], str]] = None) -> Tuple[bool, str]:
     """A long or interactive action: show what runs, run it attached so output streams,
-    then show the result. `steps` is (step name, args); a failed step asks before the next.
+    then show the result. `steps` is (step name, args); stop on the first failure.
     Returns (all succeeded, failure reason)."""
     lines = [paint(title, "title"), ""] + [strip_ctl(e) for e in explain] + [""]
     lines += [show_command(a) for _, a in steps]
     lines.append("")
     emit(lines)
-    if ask_first and not confirm("Run it?", default):
-        return False, CANCELLED
-    ok = True
     reason = ""
-    for i, (name, args) in enumerate(steps):
+    for name, args in steps:
+        reason = check(args) if check else ""
+        if reason:
+            break
         rc = run_fg(args)
         if rc != 0:
-            ok = False
             reason = f"'{name}' exited with code {rc}"
-            if i + 1 < len(steps):
-                nxt = steps[i + 1][0]
-                if not confirm(f"'{name}' did not finish cleanly. Continue with '{nxt}' anyway?", False):
-                    break
-            else:
-                break
+            break
+    ok = not reason
     print()
     print(paint("Done.", "ok") if ok else paint(f"Failed: {reason}", "bad"))
     wait_enter()

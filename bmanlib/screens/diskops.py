@@ -32,7 +32,9 @@ def disk_fingerprint(d: M.Disk) -> Tuple[str, int, str, str]:
 def still_free(chosen: Sequence[M.Disk]) -> bool:
     """Re-check right before erasing: same disks, same identity, still free."""
     from ..btrfs import disk_inventory
-    disks, uses, _, _ = disk_inventory()
+    disks, uses, _, err = disk_inventory()
+    if err:
+        return False
     now = {d.name: d for d in disks}
     for d in chosen:
         cur = now.get(d.name)

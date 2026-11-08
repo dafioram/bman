@@ -46,7 +46,7 @@ When you type a size, 500G means 500 GB; write 500GiB for 1024-based.
 bman never schedules anything. For automatic snapshots use snapper or btrbk;
 for scheduled scrubs, the btrfsmaintenance package.
 
-bman keeps its own snapshots in .snapshots/<subvolume>/ at the top level of
+bman keeps its own snapshots in .snapshots/.bman/<subvolume>/ at the top level of
 each filesystem. To reach the top level it mounts it under /run/bman while it
 runs, and unmounts it when you quit.
 """
@@ -97,7 +97,7 @@ Columns
   SIZE     space only this snapshot holds: what deleting it alone would free.
            Shown when quotas are on, or after z. Several snapshots can share
            data, so deleting a group can free more than the sum.
-  MADE BY  bman (in .snapshots/), snapper, Timeshift, or other.
+  MADE BY  bman (in .snapshots/.bman/), snapper, Timeshift, or other.
 """
 
 DISKS = LIST_KEYS + """\

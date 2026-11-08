@@ -117,7 +117,7 @@ def source_of(s: M.Subvol, by_uuid: Dict[str, M.Subvol], top: M.Subvol) -> Optio
         return None
     if s.parent_uuid in by_uuid:
         return by_uuid[s.parent_uuid]
-    if s.parent_uuid == top.uuid or s.path.startswith(M.snapshot_dir("") + "/"):
+    if s.parent_uuid == top.uuid or s.path.startswith((M.snapshot_dir("") + "/", ".snapshots/_top/")):
         return top
     return None
 

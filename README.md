@@ -66,7 +66,7 @@ they install, which is how the tests run them without root.
   (default name `data`) mounted where you choose, with `subvol=/data`. The top
   level stays unmounted. This keeps restore possible and the layout tidy.
 - **Snapshots next to the subvolumes.** bman keeps its read-only snapshots in
-  `.snapshots/<subvolume>/<name>` at the top level of the filesystem, not inside
+  `.snapshots/.bman/<subvolume>/<name>` at the top level of the filesystem, not inside
   the subvolume. They survive restoring or deleting the subvolume.
 - **A private working mount.** To reach the top level, bman mounts it under
   `/run/bman/<uuid>` when it needs to, and unmounts it when you quit. When you
@@ -145,7 +145,7 @@ mirrored** if bman shows it, because writes made while degraded have only one co
 (with quotas) and where each is mounted. Each mounted filesystem also has a
 `(top level)` row: its root, which is where your files are if you use the drive
 without subvolumes. It shows the compression in effect, can be snapshotted (into
-`.snapshots/_top/`), and is never offered for delete, rename or restore; to get
+`.snapshots/.bman/_top/`), and is never offered for delete, rename or restore; to get
 files back from a top-level snapshot, open a shell in the snapshot and copy them. A subvolume's view: take a snapshot, list
 its snapshots, mount and unmount, add to or remove from fstab, compression, open a
 shell in it, rename, delete. Delete is refused while it is mounted, is the default
@@ -168,8 +168,9 @@ name, linking to its filesystem and device.
 
 **Space & cleanup.** Raw size, used and free per filesystem, data chunks that are
 allocated but unused (with a link to reclaim them), snapshot counts and sizes, and
-**Prune snapshots**: pick from a list and type the count. Snapshots made by snapper
-or Timeshift and mounted snapshots are never listed.
+**Prune snapshots**: pick from a list and type the count. This list includes only
+unmounted snapshots in bman's reserved `.snapshots/.bman/` directory. Snapshots
+from older bman releases stay visible under Snapshots and can be handled individually.
 
 **System info.** bman and btrfs-progs versions, kernel, whether simple quotas are
 available, the config, fstab and working mounts, scheduled scrubs, and snapshot

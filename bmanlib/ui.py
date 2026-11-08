@@ -345,8 +345,9 @@ def show_command(args: Sequence[str]) -> str:
     """The exact command, dim, wrapped between arguments where possible."""
     import textwrap
     width, _ = term_size()
-    text = "Command: " + shlex.join([str(a) for a in args])
-    lines = textwrap.wrap(text, width, subsequent_indent="  ", break_on_hyphens=False) or [text]
+    text = "Command: " + shlex.join([str(a) if str(a).isprintable() else repr(str(a)) for a in args])
+    lines = textwrap.wrap(text, width, subsequent_indent="  ", break_on_hyphens=False,
+                          expand_tabs=False, replace_whitespace=False) or [text]
     return "\n".join(paint(x, "dim") for x in lines)
 
 
